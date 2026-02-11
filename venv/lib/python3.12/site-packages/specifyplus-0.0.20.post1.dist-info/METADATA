@@ -1,0 +1,12 @@
+Metadata-Version: 2.4
+Name: specifyplus
+Version: 0.0.20.post1
+Summary: SpecifyPlus CLI - Enhanced Spec-Driven Development toolkit with patterns & templates for building scalable multi-agent AI systems. Treats specifications, architecture history, prompt history, tests, and automated evaluations as first-class artifacts.
+License-File: LICENSE
+Requires-Python: >=3.11
+Requires-Dist: httpx[socks]
+Requires-Dist: platformdirs
+Requires-Dist: readchar
+Requires-Dist: rich
+Requires-Dist: truststore>=0.10.4
+Requires-Dist: typer
