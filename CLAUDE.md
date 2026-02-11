@@ -1,6 +1,64 @@
-# Claude Code Rules
+# CLAUDE.md
 
-This file is generated during init for the selected agent.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project Overview
+
+This is a **Spec-Driven Development (SDD) project** using the SpecifyPlus framework. It is currently in template state — no application source code exists yet. Features are developed through a structured workflow: specify → clarify → plan → tasks → implement.
+
+## Environment
+
+- **Python 3.12** with a local `venv/` virtual environment
+- **SpecifyPlus CLI** (`sp` command) installed in venv
+- Activate venv before running commands: `source venv/bin/activate`
+
+## Key Commands
+
+```bash
+sp --help                # SpecifyPlus CLI help
+sp init                  # Initialize project
+sp check                 # Validate prerequisites
+sp version               # Show version
+```
+
+### SDD Workflow (Claude Code slash commands)
+
+| Command | Purpose |
+|---------|---------|
+| `/sp.specify` | Create feature spec from description |
+| `/sp.plan` | Generate implementation plan |
+| `/sp.tasks` | Break plan into dependency-ordered tasks |
+| `/sp.implement` | Execute tasks from tasks.md |
+| `/sp.clarify` | Resolve ambiguities in spec |
+| `/sp.analyze` | Cross-artifact consistency check |
+| `/sp.checklist` | Generate quality checklist |
+| `/sp.adr` | Create Architecture Decision Record |
+| `/sp.phr` | Create Prompt History Record |
+| `/sp.constitution` | Manage project principles |
+| `/sp.reverse-engineer` | Reverse engineer existing code |
+| `/sp.git.commit_pr` | Git commit and PR workflow |
+| `/sp.taskstoissues` | Convert tasks to GitHub issues |
+
+## Project Structure
+
+```
+.specify/
+  memory/constitution.md    — Project principles and guardrails
+  templates/                — Markdown templates (spec, plan, tasks, adr, phr)
+  scripts/bash/             — Automation scripts
+.claude/commands/           — Claude Code slash command definitions
+specs/<feature>/            — Feature artifacts (spec.md, plan.md, tasks.md)
+history/prompts/            — Prompt History Records (by feature or general)
+history/adr/                — Architecture Decision Records
+```
+
+### Feature directory convention
+
+Each feature uses `[NUMBER]-[short-name]` format (e.g., `001-user-auth`). Feature directories under `specs/` contain: `spec.md`, `plan.md`, `tasks.md`, and optionally `research.md`, `data-model.md`, `contracts/`, `checklists/`.
+
+---
+
+# Claude Code Rules
 
 You are an expert AI assistant specializing in Spec-Driven Development (SDD). Your primary goal is to work with the architext to build products.
 
@@ -208,3 +266,10 @@ Wait for consent; never auto-create ADRs. Group related decisions (stacks, authe
 
 ## Code Standards
 See `.specify/memory/constitution.md` for code quality, testing, performance, security, and architecture principles.
+
+## Active Technologies
+- Python 3.12 + watchdog >=6.0 (filesystem monitoring) (001-vault-sentinel)
+- Local filesystem (Markdown files in vault folders) (001-vault-sentinel)
+
+## Recent Changes
+- 001-vault-sentinel: Added Python 3.12 + watchdog >=6.0 (filesystem monitoring)
