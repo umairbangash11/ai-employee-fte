@@ -9,6 +9,9 @@ description = "Local-first autonomous file watcher for Obsidian vaults"
 requires-python = ">=3.12"
 dependencies = [
     "watchdog>=6.0",
+    "playwright>=1.40",
+    "python-dotenv>=1.0",
+    "openai>=1.0",
 ]
 
 [project.optional-dependencies]
@@ -18,3 +21,7 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[project.scripts]
+gmail-sentinel = "sentinels.gmail_watcher:main"
+brain = "orchestrator.brain:main"

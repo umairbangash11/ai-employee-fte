@@ -25,6 +25,9 @@ venv/
 .DS_Store
 Thumbs.db
 
+# Watcher state (Playwright sessions, dedup hashes)
+.watcher-state/
+
 # Testing
 .pytest_cache/
 htmlcov/

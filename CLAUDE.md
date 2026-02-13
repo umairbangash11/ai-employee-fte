@@ -269,7 +269,93 @@ See `.specify/memory/constitution.md` for code quality, testing, performance, se
 
 ## Active Technologies
 - Python 3.12 + watchdog >=6.0 (filesystem monitoring) (001-vault-sentinel)
+- Playwright (Python) — browser automation for Gmail/WhatsApp monitoring (Silver Tier)
+- OpenAI API (openai>=1.0, gpt-4o) — email classification and draft reply generation (Silver Tier)
 - Local filesystem (Markdown files in vault folders) (001-vault-sentinel)
 
+## Skill: WatcherInfrastructure (Silver Tier — ratified)
+
+### Purpose
+Specialized guidance for building Python-based sentinel scripts that monitor Gmail, WhatsApp, and filesystem events, converting unread or urgent items into standardized Markdown files routed to `/Inbox` or `/Needs_Action`.
+
+### Technology Stack
+- **Python 3.12** — all watcher scripts
+- **watchdog >=6.0** — filesystem event monitoring (Bronze Tier, already active)
+- **Playwright (Python)** — browser automation for Gmail and WhatsApp Web scraping
+- **python-dotenv** — credential and configuration management via `.env`
+
+### Watcher Types
+
+#### 1. Filesystem Watcher (Bronze Tier — active)
+- Uses `watchdog.observers.Observer` with custom `FileSystemEventHandler` subclasses
+- Monitors designated vault directories for create/modify/move/delete events
+- Routes new files to `/Inbox` with YAML frontmatter injection
+
+#### 2. Gmail Watcher (Silver Tier — active)
+- Uses Playwright to automate Gmail Web (no IMAP/API dependency)
+- Polls for unread emails at a configurable interval (default: 5 min)
+- Extracts: sender, subject, date, body preview, attachments list
+- Converts each unread email to a Markdown file in `/Inbox/email/`
+- Marks urgent emails (starred, priority-flagged) and routes to `/Needs_Action/email/`
+
+#### 3. WhatsApp Watcher (Silver Tier — active)
+- Uses Playwright to automate WhatsApp Web
+- Monitors for unread conversations and new messages
+- Extracts: contact/group name, timestamp, message text, media indicators
+- Converts unread threads to Markdown files in `/Inbox/whatsapp/`
+- Routes messages containing keywords (configurable urgency list) to `/Needs_Action/whatsapp/`
+
+### Standardized Markdown Output Format
+All watchers MUST produce Obsidian-compatible Markdown with this frontmatter:
+
+```yaml
+---
+source: gmail | whatsapp | filesystem
+captured_at: 2026-02-12T14:30:00Z
+sender: "Name or Path"
+subject: "Subject or Filename"
+urgency: normal | urgent
+status: unread
+tags: [inbox, <source>]
+---
+```
+
+Body content follows as standard Markdown. Attachments are listed as `- [ ] attachment: filename.ext`.
+
+### Implementation Patterns
+
+#### Sentinel Script Structure
+Each watcher follows this pattern:
+1. **Config loading** — read `.env` for credentials, intervals, paths
+2. **Session management** — Playwright browser context with persistent storage (cookie reuse)
+3. **Poll loop** — configurable interval, idempotent (skip already-captured items via hash dedup)
+4. **Markdown emission** — write to `/Inbox` or `/Needs_Action` per urgency rules
+5. **Logging** — every poll cycle logs to `/Logs` with timestamp, items found, items written
+6. **Retry** — follows Ralph Wiggum Loop (constitution Principle V): 3 attempts, then `/Needs_Action`
+
+#### Deduplication Strategy
+- Each captured item gets a deterministic hash (source + sender + timestamp + subject)
+- Hash registry stored in `.watcher-state/<source>.json`
+- Items already in the registry are skipped on subsequent polls
+
+#### Error Handling
+- Browser session expired → re-authenticate, log warning
+- Network timeout → retry per Principle V
+- Malformed content → write partial Markdown with `status: error` frontmatter, route to `/Needs_Action`
+
+### Security Constraints
+- No credentials in code; all auth via `.env` (Playwright stored sessions in `.watcher-state/`)
+- `.watcher-state/` MUST be in `.gitignore`
+- Playwright runs headless by default; headed mode only for initial auth setup
+
+### Non-Goals (for this skill)
+- No email sending or WhatsApp reply capability
+- No cloud sync or external API beyond browser automation
+- No real-time push notifications (poll-based only)
+- No message deletion or modification at source
+
 ## Recent Changes
+- Logic Orchestrator (brain.py): Switched from Anthropic to OpenAI SDK (gpt-4o) for email triage
+- Constitution amended to v1.1.0: Silver Tier ratified (Principle VI: Silver Tier Autonomy)
+- WatcherInfrastructure skill unblocked: Gmail and WhatsApp watchers now active
 - 001-vault-sentinel: Added Python 3.12 + watchdog >=6.0 (filesystem monitoring)

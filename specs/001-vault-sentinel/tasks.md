@@ -186,6 +186,53 @@ Task: "Wire watch subcommand in src/sentinel/__main__.py"            # T015
 
 ---
 
+## Silver Tier: Gmail Sentinel (added 2026-02-12)
+
+**Purpose**: Playwright-based Gmail monitoring per Constitution Principle VI and WatcherInfrastructure skill.
+
+- [x] T021 [P] Add `playwright>=1.40` and `python-dotenv>=1.0` to `pyproject.toml` dependencies
+- [x] T022 [P] Add `.watcher-state/` to `.gitignore`
+- [x] T023 Create `src/sentinels/__init__.py` package with version constant
+- [x] T024 Implement `src/sentinels/gmail_watcher.py`: `GmailWatcher` class with Playwright login, unread scraping, Markdown emission with standard YAML frontmatter, hash-based deduplication via `.watcher-state/gmail.json`, Ralph Wiggum retry loop, urgency routing (`/Inbox/email/` vs `/Needs_Action/email/`), and logging to `/Logs`
+- [x] T025 [P] Create `.env.example` documenting `GMAIL_EMAIL`, `GMAIL_PASSWORD`, `VAULT_PATH`, `GMAIL_POLL_INTERVAL`, `GMAIL_HEADLESS`
+- [x] T026 Add `gmail-sentinel` entry point to `pyproject.toml` `[project.scripts]`
+- [x] T027 Verify syntax, utility functions (`compute_email_hash`, `sanitize_filename`), Markdown output format, deduplication, and urgency routing
+
+**Checkpoint**: Gmail Sentinel ready for end-to-end testing with a live Gmail account.
+
+---
+
+## Silver Tier: Logic Orchestrator (added 2026-02-12)
+
+**Purpose**: AI-powered email triage with Anthropic Claude API and draft reply generation.
+
+- [x] T028 [P] Add `anthropic>=0.40` to `pyproject.toml` dependencies
+- [x] T029 [P] Add `ANTHROPIC_API_KEY` and `ANTHROPIC_MODEL` to `.env.example`
+- [x] T030 Create `src/orchestrator/__init__.py` package with version constant
+- [x] T031 Implement `src/orchestrator/brain.py`: `InboxTriageHandler(FileSystemEventHandler)` with watchdog monitoring of `vault/Inbox/` (recursive), `parse_email_frontmatter()` for YAML extraction, `classify_email()` calling Claude API with Assistant persona, `write_draft_reply()` generating Obsidian-compatible draft in `Needs_Action/drafts/`, Ralph Wiggum retry loop, execution plan to `Approved/` before moves, logging to `Logs/`
+- [x] T032 Add `brain` entry point to `pyproject.toml` `[project.scripts]`
+- [x] T033 Verify syntax, frontmatter parsing, draft reply output, handler instantiation, and IDE diagnostics
+
+**Checkpoint**: Logic Orchestrator ready for end-to-end testing with OpenAI API key.
+
+---
+
+## Silver Tier: Orchestrator SDK Swap (added 2026-02-12)
+
+**Purpose**: Refactor Logic Orchestrator from Anthropic SDK to OpenAI SDK with gpt-4o.
+
+- [x] T034 Replace `import anthropic` with `from openai import OpenAI` in `src/orchestrator/brain.py`
+- [x] T035 Rewrite `classify_email()` to use `client.chat.completions.create()` with system/user message format
+- [x] T036 Update `load_config()` to read `OPENAI_API_KEY` and `OPENAI_MODEL` (default: `gpt-4o`)
+- [x] T037 Update `InboxTriageHandler.__init__` and `start_brain()` type hints and defaults
+- [x] T038 [P] Replace `anthropic>=0.40` with `openai>=1.0` in `pyproject.toml`
+- [x] T039 [P] Update `.env.example` with `OPENAI_API_KEY` and `OPENAI_MODEL`
+- [x] T040 Verify zero Anthropic references remain, syntax valid, all utility checks pass, 0 IDE diagnostics
+
+**Checkpoint**: Orchestrator uses OpenAI gpt-4o. All vault routing logic unchanged.
+
+---
+
 ## Notes
 
 - [P] tasks = different files, no dependencies
@@ -193,4 +240,4 @@ Task: "Wire watch subcommand in src/sentinel/__main__.py"            # T015
 - Each user story is independently completable and testable
 - Commit after each task or logical group
 - Stop at any checkpoint to validate story independently
-- Total tasks: 20 (4 setup + 3 foundational + 3 US1 + 5 US2 + 2 US3 + 3 polish)
+- Total tasks: 40 (4 setup + 3 foundational + 3 US1 + 5 US2 + 2 US3 + 3 polish + 7 Gmail + 6 Orchestrator + 7 SDK Swap)
