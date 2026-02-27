@@ -355,7 +355,6 @@ Each watcher follows this pattern:
 - No message deletion or modification at source
 
 ## Recent Changes
+- 002-inbox-router: Rule-based router for email triage (Inbox → Needs_Action) with flag/keyword/SLA rules
 - Logic Orchestrator (brain.py): Switched from Anthropic to OpenAI SDK (gpt-4o) for email triage
 - Constitution amended to v1.1.0: Silver Tier ratified (Principle VI: Silver Tier Autonomy)
-- WatcherInfrastructure skill unblocked: Gmail and WhatsApp watchers now active
-- 001-vault-sentinel: Added Python 3.12 + watchdog >=6.0 (filesystem monitoring)
