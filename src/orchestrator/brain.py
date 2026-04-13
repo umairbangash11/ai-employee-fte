@@ -12,6 +12,25 @@ Constitution compliance:
 - Principle V:  Ralph Wiggum retry loop (3 attempts) on failures.
 - Principle VI: Draft replies are LOCAL only. No sending without
                 Human-in-the-Loop via /Approved.
+
+HITL Approval Integration (Phase 3):
+------------------------------------
+For LinkedIn posts and other external actions, use the HITL approval system
+instead of direct execution. Example integration:
+
+    from hitl_approval.writer import request_linkedin_post_approval
+
+    # When orchestrator decides to publish a LinkedIn post:
+    approval_path = request_linkedin_post_approval(
+        post_content="Post content here...",
+        source_task_path="Needs_Action/tasks/weekly-update.md",
+        reasoning="Weekly engagement post based on task requirements",
+        vault_path=vault_path,
+    )
+    # File created in /Pending_Approval/linkedin/
+    # Human moves to /Approved/linkedin/ to authorize execution
+
+See src/hitl_approval/writer.py for full API documentation.
 """
 
 import os

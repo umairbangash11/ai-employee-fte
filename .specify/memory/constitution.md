@@ -1,19 +1,22 @@
 <!--
 Sync Impact Report
 ===================
-- Version change: 1.0.0 → 1.1.0 (Silver Tier amendment)
+- Version change: 1.1.0 → 2.0.0 (Hackathon 0 restructure)
 - Modified principles:
-  - III. Bronze Tier Scope → III. Tiered Scope (expanded to define Bronze and Silver boundaries)
+  - III. Tiered Scope → III. Tiered Scope (amended to note Silver Tier Gmail migration)
+  - VI. Silver Tier Autonomy → VI. Silver Tier Autonomy (amended for Gmail API path)
 - Added principles:
-  - VI. Silver Tier Autonomy
-- Added to Operational Constraints:
-  - Playwright session security rule
+  - VII. Phased Development (new 4-phase hackathon structure)
+  - VIII. Gmail API Migration Safety
+- Added sections:
+  - Project Structure (required directory layout)
+  - Phase Execution Rules
 - Removed sections: none
 - Templates requiring updates:
-  - `.specify/templates/plan-template.md` — ✅ no update needed (Constitution Check section is generic)
-  - `.specify/templates/spec-template.md` — ✅ no update needed (structure is generic)
-  - `.specify/templates/tasks-template.md` — ✅ no update needed (phases are generic)
-- Follow-up TODOs: none
+  - `.specify/templates/plan-template.md` — review for phase alignment
+  - `.specify/templates/spec-template.md` — review for phase scoping
+- Follow-up TODOs:
+  - Create /phase-1/, /phase-2/, /phase-3/, /phase-4/ directories when specs are created
 -->
 
 # Digital FTE Constitution
@@ -57,11 +60,16 @@ lower-tier capabilities.
    for new or changed files and routing them through the
    canonical folder structure.
 
-**Silver Tier** (ratified 2026-02-12):
+**Silver Tier** (ratified 2026-02-12, amended 2026-03-03):
 
-3. **Gmail monitoring** — browser-automated polling of Gmail Web
-   for unread and urgent emails, converting them to Markdown
-   files routed to `/Inbox/email/` or `/Needs_Action/email/`.
+3. **Gmail monitoring** — polling Gmail for unread and urgent
+   emails, converting them to Markdown files routed to
+   `/Inbox/email/` or `/Needs_Action/email/`.
+
+   **Migration note**: Silver Tier Gmail monitoring is transitioning
+   from Playwright browser automation to Gmail API with OAuth.
+   See Principle VIII for migration safety rules.
+
 4. **WhatsApp monitoring** — browser-automated polling of
    WhatsApp Web for unread conversations, converting them to
    Markdown files routed to `/Inbox/whatsapp/` or
@@ -104,24 +112,24 @@ indefinitely.
 
 ### VI. Silver Tier Autonomy
 
-Silver Tier authorizes the use of **Playwright** (Python) for
-browser-automated monitoring of Gmail and WhatsApp Web. This
-principle defines what the system MAY and MUST NOT do at Silver
-Tier.
+Silver Tier authorizes read-only monitoring of Gmail and WhatsApp
+Web. This principle defines what the system MAY and MUST NOT do
+at Silver Tier.
 
 **Permitted (read-only monitoring):**
 
-- Poll Gmail Web for unread, starred, or priority-flagged emails
-  at a configurable interval.
-- Poll WhatsApp Web for unread conversations and new messages.
+- Poll Gmail for unread, starred, or priority-flagged emails
+  at a configurable interval (via Gmail API with OAuth).
+- Poll WhatsApp Web for unread conversations and new messages
+  (via Playwright browser automation).
 - Extract message metadata (sender, subject, timestamp, body
   preview, attachment list, contact/group name).
 - Convert captured items to Obsidian-compatible Markdown files
   with standardized YAML frontmatter.
 - Route normal items to `/Inbox/<source>/` and urgent items to
   `/Needs_Action/<source>/`.
-- Maintain persistent browser sessions (cookie reuse) to avoid
-  repeated authentication.
+- Maintain persistent sessions (OAuth tokens for Gmail, cookies
+  for WhatsApp) to avoid repeated authentication.
 
 **Prohibited without Human-in-the-Loop:**
 
@@ -153,6 +161,98 @@ deterministic hash (source + sender + timestamp + subject).
 Previously captured items (tracked in `.watcher-state/`) MUST
 be skipped. The system MUST NOT produce duplicate Markdown files.
 
+### VII. Phased Development
+
+Development is structured into four sequential phases. Each phase
+MUST be completed before the next phase begins. Phases MUST NOT
+be skipped, reordered, or combined.
+
+**Phase 1: Gmail API Migration**
+Replace Gmail Playwright automation with Gmail API watcher safely.
+Scope is limited to `/phase-1/` specs only.
+
+**Phase 2: HITL + Approval Workflow Hardening**
+File-based approvals + audit logs. Scope is limited to `/phase-2/`
+specs only.
+
+**Phase 3: Process Management & Reliability**
+PM2/systemd runbooks, auto-restart, backoff. Scope is limited to
+`/phase-3/` specs only.
+
+**Phase 4: Demo & Documentation**
+Setup guide + demo script + troubleshooting. Scope is limited to
+`/phase-4/` specs only.
+
+**Phase Execution Rules:**
+
+For each phase, execute in this order using SpecifyPlus commands:
+
+1. `/sp.specify` — Create spec scoped to `/phase-X/` only
+2. `/sp.plan` — Generate plan based strictly on approved spec
+3. `/sp.tasks` — Create small, verifiable, non-expanding tasks
+4. `/sp.implement` — Execute only tasks from the approved spec
+
+A phase is closed only after explicit user acknowledgement.
+Do NOT auto-start the next phase.
+
+### VIII. Gmail API Migration Safety
+
+This principle governs the Phase 1 migration from Playwright to
+Gmail API. These rules are project-wide and MUST be followed
+throughout the migration.
+
+**Required:**
+
+- Use Gmail API with OAuth 2.0 for authentication
+- Store OAuth tokens and secrets outside the Obsidian vault
+- Implement conservative polling with exponential backoff
+- OAuth credentials MUST be stored in `.env` or secure storage
+- Respect Gmail API rate limits (250 quota units/user/second)
+
+**Prohibited:**
+
+- Do NOT use Playwright for Gmail (WhatsApp still uses Playwright)
+- Do NOT use password-based or app-password authentication
+- Do NOT commit OAuth tokens, secrets, or credentials to git
+- Do NOT implement aggressive polling loops
+- Do NOT change CLI entrypoint to a new module until that module
+  exists and has a working `main()` function
+
+**Migration Safety Checklist:**
+
+Before switching the CLI entrypoint from the old Gmail watcher to
+the new Gmail API watcher:
+
+1. New module MUST exist at the target path
+2. New module MUST have a `main()` function
+3. New module MUST be tested manually with real Gmail account
+4. Old module MUST remain available as fallback during transition
+
+## Project Structure
+
+The repository root MUST contain the following directories:
+
+```
+/phase-1/          # Gmail API Migration specs and artifacts
+/phase-2/          # HITL + Approval Workflow specs
+/phase-3/          # Process Management specs
+/phase-4/          # Demo & Documentation specs
+/sentinels/        # Watchers and sentinel entrypoints
+/orchestrator/     # Orchestrator + health monitoring
+/skills/           # Skill docs and references
+/vault_templates/  # Obsidian vault templates and schemas
+/docs/             # Architecture notes, setup, runbooks
+pyproject.toml
+README.md
+.env.example
+.gitignore
+```
+
+**Protected directories (MUST NOT be modified):**
+
+- `.specify/` — SpecifyPlus internal folders
+- `.claude/` — Claude Code command definitions
+
 ## Operational Constraints
 
 - **No secrets in code**: All API keys, tokens, and credentials
@@ -164,10 +264,13 @@ be skipped. The system MUST NOT produce duplicate Markdown files.
 - **Obsidian compatibility**: Files written to the vault MUST
   be valid Markdown compatible with Obsidian (YAML frontmatter,
   `[[wikilinks]]`, standard Markdown syntax).
-- **Playwright session security**: Browser session data stored
-  in `.watcher-state/` MUST be excluded from version control
-  via `.gitignore`. Playwright MUST run headless by default;
-  headed mode is permitted only for initial authentication setup.
+- **OAuth token security**: Gmail OAuth tokens stored in
+  `.watcher-state/` or `.secrets/` MUST be excluded from version
+  control via `.gitignore`.
+- **Playwright session security**: WhatsApp browser session data
+  stored in `.watcher-state/` MUST be excluded from version
+  control. Playwright MUST run headless by default; headed mode
+  is permitted only for initial authentication setup.
 
 ## Development Workflow
 
@@ -193,8 +296,8 @@ be skipped. The system MUST NOT produce duplicate Markdown files.
   redefinitions; MINOR for new principles or material expansions;
   PATCH for clarifications and typo fixes.
 - **Compliance review**: Every `/sp.plan` output MUST include a
-  Constitution Check section validating adherence to all six
+  Constitution Check section validating adherence to all eight
   principles. Violations MUST be justified in a Complexity
   Tracking table.
 
-**Version**: 1.1.0 | **Ratified**: 2026-02-11 | **Last Amended**: 2026-02-12
+**Version**: 2.0.0 | **Ratified**: 2026-02-11 | **Last Amended**: 2026-03-03

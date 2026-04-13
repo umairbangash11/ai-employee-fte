@@ -28,6 +28,9 @@ Thumbs.db
 # Watcher state (Playwright sessions, dedup hashes)
 .watcher-state/
 
+# OAuth credentials and tokens (outside vault)
+secrets/
+
 # Testing
 .pytest_cache/
 htmlcov/

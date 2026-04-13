@@ -272,6 +272,8 @@ See `.specify/memory/constitution.md` for code quality, testing, performance, se
 - Playwright (Python) — browser automation for Gmail/WhatsApp monitoring (Silver Tier)
 - OpenAI API (openai>=1.0, gpt-4o) — email classification and draft reply generation (Silver Tier)
 - Local filesystem (Markdown files in vault folders) (001-vault-sentinel)
+- Python 3.12 + google-api-python-client, google-auth, google-auth-oauthlib, pyyaml, python-dotenv (003-gmail-api-oauth)
+- Local filesystem (JSON for tokens/state, Markdown for emails) (003-gmail-api-oauth)
 
 ## Skill: WatcherInfrastructure (Silver Tier — ratified)
 
@@ -355,6 +357,6 @@ Each watcher follows this pattern:
 - No message deletion or modification at source
 
 ## Recent Changes
+- 003-gmail-api-oauth: Added Python 3.12 + google-api-python-client, google-auth, google-auth-oauthlib, pyyaml, python-dotenv
 - 002-inbox-router: Rule-based router for email triage (Inbox → Needs_Action) with flag/keyword/SLA rules
 - Logic Orchestrator (brain.py): Switched from Anthropic to OpenAI SDK (gpt-4o) for email triage
-- Constitution amended to v1.1.0: Silver Tier ratified (Principle VI: Silver Tier Autonomy)
