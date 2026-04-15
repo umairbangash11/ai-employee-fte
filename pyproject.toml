@@ -40,6 +40,8 @@ hitl-approval = "hitl_approval.__main__:cli"
 linkedin-publish = "linkedin_publisher.__main__:cli"
 facebook-publish = "facebook_publisher.__main__:cli"
 whatsapp-watcher = "whatsapp_watcher.__main__:main"
+odoo-mcp = "odoo_mcp.__main__:main"
+odoo-executor = "odoo_accounting.executor:main"
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

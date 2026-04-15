@@ -278,6 +278,8 @@ See `.specify/memory/constitution.md` for code quality, testing, performance, se
 - Local filesystem — vault directory defined by `VAULT_PATH` env var (009-vault-mcp-server)
 - Python 3.12 + stdlib only (`pathlib`, `datetime`, `re`) — no new packages (010-runtime-plan-gen)
 - Local filesystem — `vault/Needs_Action/plans/` subdirectory (010-runtime-plan-gen)
+- Python 3.12 (project standard) + `xmlrpc.client` (stdlib — Odoo XML-RPC API), (012-odoo-accounting)
+- Local filesystem — `vault/` directory tree; Odoo Community instance (012-odoo-accounting)
 
 ## Skill: WatcherInfrastructure (Silver Tier — ratified)
 
@@ -361,6 +363,6 @@ Each watcher follows this pattern:
 - No message deletion or modification at source
 
 ## Recent Changes
+- 012-odoo-accounting: Added Python 3.12 (project standard) + `xmlrpc.client` (stdlib — Odoo XML-RPC API),
 - 010-runtime-plan-gen: Added Python 3.12 + stdlib only (`pathlib`, `datetime`, `re`) — no new packages
 - 009-vault-mcp-server: Added Python 3.12 + `mcp>=1.0` (MCP Python SDK — not yet installed), `python-dotenv>=1.0` (already installed)
-- 003-gmail-api-oauth: Added Python 3.12 + google-api-python-client, google-auth, google-auth-oauthlib, pyyaml, python-dotenv
