@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "vault": {
+      "command": "python3",
+      "args": ["-m", "vault_mcp"],
+      "cwd": "/home/umair/ai-employee-fte",
+      "env": {
+        "PYTHONPATH": "/home/umair/ai-employee-fte/src"
+      }
+    }
+  }
+}

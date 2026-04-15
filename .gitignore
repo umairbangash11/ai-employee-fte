@@ -42,3 +42,8 @@ secrets/
 .pytest_cache/
 htmlcov/
 .coverage
+
+# Runtime vault data (captured emails, triage plans, personal content)
+Inbox/
+Needs_Action/
+vault/

@@ -274,6 +274,10 @@ See `.specify/memory/constitution.md` for code quality, testing, performance, se
 - Local filesystem (Markdown files in vault folders) (001-vault-sentinel)
 - Python 3.12 + google-api-python-client, google-auth, google-auth-oauthlib, pyyaml, python-dotenv (003-gmail-api-oauth)
 - Local filesystem (JSON for tokens/state, Markdown for emails) (003-gmail-api-oauth)
+- Python 3.12 + `mcp>=1.0` (MCP Python SDK — not yet installed), `python-dotenv>=1.0` (already installed) (009-vault-mcp-server)
+- Local filesystem — vault directory defined by `VAULT_PATH` env var (009-vault-mcp-server)
+- Python 3.12 + stdlib only (`pathlib`, `datetime`, `re`) — no new packages (010-runtime-plan-gen)
+- Local filesystem — `vault/Needs_Action/plans/` subdirectory (010-runtime-plan-gen)
 
 ## Skill: WatcherInfrastructure (Silver Tier — ratified)
 
@@ -357,6 +361,6 @@ Each watcher follows this pattern:
 - No message deletion or modification at source
 
 ## Recent Changes
+- 010-runtime-plan-gen: Added Python 3.12 + stdlib only (`pathlib`, `datetime`, `re`) — no new packages
+- 009-vault-mcp-server: Added Python 3.12 + `mcp>=1.0` (MCP Python SDK — not yet installed), `python-dotenv>=1.0` (already installed)
 - 003-gmail-api-oauth: Added Python 3.12 + google-api-python-client, google-auth, google-auth-oauthlib, pyyaml, python-dotenv
-- 002-inbox-router: Rule-based router for email triage (Inbox → Needs_Action) with flag/keyword/SLA rules
-- Logic Orchestrator (brain.py): Switched from Anthropic to OpenAI SDK (gpt-4o) for email triage
