@@ -42,6 +42,9 @@ facebook-publish = "facebook_publisher.__main__:cli"
 whatsapp-watcher = "whatsapp_watcher.__main__:main"
 odoo-mcp = "odoo_mcp.__main__:main"
 odoo-executor = "odoo_accounting.executor:main"
+instagram-executor = "instagram_publisher.__main__:cli"
+x-executor = "x_publisher.__main__:cli"
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+asyncio_mode = "auto"

@@ -12,7 +12,7 @@ from facebook_publisher.exceptions import FrontmatterValidationError
 from facebook_publisher.models import ApprovedPost
 from facebook_publisher.utils import read_frontmatter
 
-# Required frontmatter fields
+# Required frontmatter fields (legacy schema — type: approval_request)
 REQUIRED_FIELDS = [
     "type",
     "action_type",
@@ -20,7 +20,15 @@ REQUIRED_FIELDS = [
     "target",
 ]
 
-# Required nested fields
+# Required fields for canonical schema (type: pending_action from social_drafters)
+CANONICAL_REQUIRED_FIELDS = [
+    "type",
+    "action_type",
+    "status",
+    "platform",
+]
+
+# Required nested fields (legacy schema only)
 REQUIRED_TARGET_FIELDS = ["platform", "visibility"]
 
 
@@ -55,22 +63,33 @@ def validate_frontmatter(frontmatter: dict[str, Any]) -> list[str]:
     """
     errors = []
 
-    # Check required top-level fields
-    for field in REQUIRED_FIELDS:
+    # Choose required fields based on schema type
+    schema_type = frontmatter.get("type")
+    required = CANONICAL_REQUIRED_FIELDS if schema_type == "pending_action" else REQUIRED_FIELDS
+    for field in required:
         if field not in frontmatter:
             errors.append(f"Missing required field: {field}")
 
-    # Check type value
-    if frontmatter.get("type") != "approval_request":
-        errors.append(f"Invalid type: expected 'approval_request', got '{frontmatter.get('type')}'")
+    # Check type value — accept both legacy and canonical schema (AD-002)
+    valid_types = {"approval_request", "pending_action"}
+    if frontmatter.get("type") not in valid_types:
+        errors.append(f"Invalid type: expected one of {sorted(valid_types)}, got '{frontmatter.get('type')}'")
 
-    # Check action_type value
-    if frontmatter.get("action_type") != "publish_facebook_post":
+    # Check action_type value — accept both legacy and canonical schema (AD-002)
+    valid_action_types = {"publish_facebook_post", "publish_post"}
+    if frontmatter.get("action_type") not in valid_action_types:
         errors.append(
-            f"Invalid action_type: expected 'publish_facebook_post', got '{frontmatter.get('action_type')}'"
+            f"Invalid action_type: expected one of {sorted(valid_action_types)}, got '{frontmatter.get('action_type')}'"
         )
 
-    # Check target nested fields
+    # For canonical schema (type: pending_action), platform is a top-level field
+    if frontmatter.get("type") == "pending_action":
+        if frontmatter.get("platform") != "facebook":
+            errors.append(f"Invalid platform: expected 'facebook', got '{frontmatter.get('platform')}'")
+        # Canonical schema has no 'target' dict — skip target validation
+        return errors
+
+    # Legacy schema: check target nested fields
     target = frontmatter.get("target", {})
     if not isinstance(target, dict):
         errors.append("'target' must be a dictionary")
@@ -105,8 +124,8 @@ def extract_content(body: str) -> str:
     Returns:
         Extracted content string
     """
-    # Try to find ## Content Preview section
-    pattern = r"##\s*Content\s*Preview\s*\n(.*?)(?=\n##|\Z)"
+    # Try to find ## Content or ## Content Preview section (canonical or legacy heading)
+    pattern = r"##\s*Content(?:\s*Preview)?\s*\n(.*?)(?=\n##|\Z)"
     match = re.search(pattern, body, re.DOTALL | re.IGNORECASE)
 
     if match:
