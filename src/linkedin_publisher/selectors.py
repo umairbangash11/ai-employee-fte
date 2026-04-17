@@ -4,64 +4,101 @@ LinkedIn's DOM structure changes frequently. This module centralizes
 all selectors for easier maintenance. Each selector has fallbacks.
 
 When selectors break:
-1. Open LinkedIn in browser
-2. Use DevTools to find new selectors
-3. Update this file
-4. Test with `linkedin-publish auth` (headed mode)
+1. Open LinkedIn in a headed browser: linkedin-publish auth
+2. Open DevTools (F12) → Elements, find the element, copy selector
+3. Update the relevant list below (prepend — most specific first)
+4. Re-run: linkedin-publish --vault-path vault/ run
 """
 
-# Selectors with fallbacks (tried in order)
+# Selectors with fallbacks (tried in order, most-likely-current first).
+# The executor tries each one with a short per-selector timeout so the
+# full list is exhausted quickly without a long overall stall.
 SELECTORS = {
-    # Button to open "Start a post" modal
+    # ── "Start a post" prompt on the feed page ───────────────────────────
     "start_post_button": [
+        # Current layout (2024-2025)
+        "[data-placeholder*='Start a post']",
+        "[aria-placeholder*='Start a post']",
+        "button[aria-label*='start a post' i]",
+        ".share-creation-state__trigger",
+        # Classic layout selectors (still present on some accounts)
         "button.share-box-feed-entry__trigger",
-        "button[aria-label='Start a post']",
+        "div.share-box-feed-entry__trigger",
         "[data-control-name='share.main-feed-post-prompt']",
+        # Broadest fallback — the avatar/photo button that also opens the composer
         ".share-box-feed-entry__avatar",
     ],
-    # Post editor text area inside modal
+
+    # ── Post composer text editor (inside the modal) ──────────────────────
     "post_editor": [
+        # Quill-based rich text editor
         ".ql-editor[data-placeholder]",
-        "[role='textbox'][aria-label*='post']",
+        "[contenteditable='true'].ql-editor",
+        # Role-based (layout-agnostic)
+        "[role='textbox'][aria-placeholder*='What do you want to talk about']",
+        "[role='textbox'][aria-label*='Text editor']",
+        "[role='textbox'][aria-placeholder*='post']",
+        # Scoped to the share-creation panel
         ".share-creation-state__text-editor .ql-editor",
         "[contenteditable='true'][data-placeholder]",
+        # Broadest fallback — first textbox on the page
+        "[role='textbox']",
     ],
-    # Button to submit post
+
+    # ── "Post" submit button inside the composer modal ───────────────────
     "post_button": [
-        "button.share-actions__primary-action",
+        # Explicit aria-label is the most reliable
         "button[aria-label='Post']",
+        "button[aria-label*='Post' i]",
+        # Class-based (classic layout)
+        "button.share-actions__primary-action",
         "button.share-box_actions__primary-action",
         "[data-control-name='share.post']",
+        # Broadest: any primary artdeco button (use last — may match other things)
+        "button.artdeco-button--primary[aria-label*='Post']",
     ],
-    # Indicator that post was successful
+
+    # ── Post-publish confirmation (used to extract the URL) ──────────────
     "post_success_indicator": [
-        ".feed-shared-update-v2",
         "[data-urn*='activity']",
+        ".feed-shared-update-v2",
         ".update-components-actor",
         ".feed-shared-actor",
     ],
-    # Feed presence indicator (for auth check)
+
+    # ── Feed presence (auth check) ────────────────────────────────────────
     "feed_indicator": [
-        ".feed-shared-update-v2",
-        ".core-rail",
-        "#main",
         ".scaffold-layout__main",
+        "#main",
+        ".core-rail",
+        ".feed-shared-update-v2",
     ],
-    # Login form indicator (for auth check)
+
+    # ── Login form presence (auth check) ─────────────────────────────────
     "login_indicator": [
-        "form.login__form",
-        "[data-tracking-control-name='guest_homepage-basic_sign-in-submit']",
-        ".sign-in-form",
         "#username",
+        "form.login__form",
+        ".sign-in-form",
+        "[data-tracking-control-name='guest_homepage-basic_sign-in-submit']",
+    ],
+
+    # ── Cookie / consent banners ──────────────────────────────────────────
+    "cookie_banner": [
+        "button[action-type='ACCEPT']",
+        ".artdeco-global-alert button[action-type='ACCEPT']",
+        "#artdeco-global-alert-container button[action-type='ACCEPT']",
+        "button[data-tracking-control-name*='cookie-policy-banner.accept']",
+        "button[aria-label*='Accept cookies' i]",
     ],
 }
 
 # Wait times (in milliseconds)
 WAIT_TIMES = {
-    "short": 1000,      # 1 second
-    "medium": 3000,     # 3 seconds
-    "long": 5000,       # 5 seconds
-    "very_long": 10000, # 10 seconds
+    "short": 1000,       # 1 s  — brief pause after a click
+    "medium": 3000,      # 3 s  — page-settle wait
+    "long": 15000,       # 15 s — wait for an element to appear
+    "very_long": 15000,  # 15 s — wait after submitting a post
+    "per_selector": 3000, # 3 s — per-selector probe in _find_and_click
 }
 
 # URLs

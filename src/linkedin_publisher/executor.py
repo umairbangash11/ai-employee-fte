@@ -1,11 +1,13 @@
 """LinkedIn publisher using Playwright browser automation."""
 
 import asyncio
+import re
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import click
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 
 from .exceptions import AuthenticationError, PublishError, is_retryable_error
@@ -13,6 +15,7 @@ from .models import PublishResult
 from .selectors import (
     get_selector_with_fallbacks,
     get_all_selectors,
+    SELECTORS,
     WAIT_TIMES,
     URLS,
 )
@@ -36,15 +39,25 @@ class LinkedInPublisher:
         headless: Run browser in headless mode
     """
 
-    def __init__(self, session_path: Path, headless: bool = True):
+    def __init__(
+        self,
+        session_path: Path,
+        headless: bool = True,
+        storage_state_path: Optional[Path] = None,
+    ):
         """Initialize publisher.
 
         Args:
-            session_path: Path to store Playwright session (cookies, localStorage)
-            headless: Run browser in headless mode (False for auth)
+            session_path: Directory for Playwright persistent context (auth only).
+            headless: Run browser in headless mode (False for auth).
+            storage_state_path: Path to storage_state.json exported after auth.
+                When provided and the file exists, the session is loaded from
+                this JSON instead of the persistent context directory, avoiding
+                headed-vs-headless Chrome profile incompatibility.
         """
         self.session_path = Path(session_path)
         self.headless = headless
+        self.storage_state_path = Path(storage_state_path) if storage_state_path else None
 
         self._playwright = None
         self._browser: Optional[Browser] = None
@@ -52,141 +65,303 @@ class LinkedInPublisher:
         self._page: Optional[Page] = None
 
     async def initialize(self) -> None:
-        """Launch browser with persistent context.
+        """Launch browser and set up page.
 
-        Uses persistent context to store cookies and localStorage,
-        allowing session reuse across runs.
+        Strategy:
+        - If storage_state_path exists (set by auth): launch a plain browser and
+          load the saved session from JSON. Works identically in headless and
+          headed mode because it is just cookies/localStorage, not a Chrome
+          profile directory.
+        - Otherwise (first-time auth): launch a persistent context so the user
+          can log in and we can export the session afterwards.
         """
-        # Ensure session directory exists
         self.session_path.mkdir(parents=True, exist_ok=True)
-
         self._playwright = await async_playwright().start()
 
-        # Launch with persistent context for session storage
-        self._context = await self._playwright.chromium.launch_persistent_context(
-            user_data_dir=str(self.session_path),
-            headless=self.headless,
-            viewport={"width": 1280, "height": 800},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        use_storage_state = (
+            self.storage_state_path is not None
+            and self.storage_state_path.exists()
         )
 
-        # Get the default page or create one
+        if use_storage_state:
+            click.echo(f"[debug] Loading session from: {self.storage_state_path}")
+            self._browser = await self._playwright.chromium.launch(headless=self.headless)
+            self._context = await self._browser.new_context(
+                storage_state=str(self.storage_state_path),
+                viewport={"width": 1280, "height": 800},
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+            )
+        else:
+            click.echo(f"[debug] No storage_state found — using persistent context at: {self.session_path}")
+            self._context = await self._playwright.chromium.launch_persistent_context(
+                user_data_dir=str(self.session_path),
+                headless=self.headless,
+                viewport={"width": 1280, "height": 800},
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+            )
+
         if self._context.pages:
             self._page = self._context.pages[0]
         else:
             self._page = await self._context.new_page()
 
     async def is_authenticated(self) -> bool:
-        """Check if LinkedIn session is valid.
+        """Check if the LinkedIn session is valid.
 
-        Navigates to LinkedIn home and checks for feed presence.
+        Strategy (fastest-first):
+        1. Navigate to the feed URL.
+        2. Check the landed URL — LinkedIn always redirects unauthenticated
+           users to /login or /authwall immediately, so the URL alone is
+           definitive in most cases.
+        3. If the URL is ambiguous (e.g. linkedin.com/ root), wait up to
+           10 seconds for a feed element to appear, then fall back to checking
+           for a login form.
 
         Returns:
-            True if authenticated, False if login required
+            True if authenticated, False otherwise.
         """
         if not self._page:
             raise RuntimeError("Publisher not initialized. Call initialize() first.")
 
         try:
+            click.echo("[debug] Navigating to feed to check session...")
             await self._page.goto(URLS["home"], wait_until="domcontentloaded")
-            await self._page.wait_for_timeout(WAIT_TIMES["medium"])
 
-            # Check for login form (indicates not authenticated)
+            current_url = self._page.url
+            click.echo(f"[debug] Landed on: {current_url}")
+
+            # --- Step 1: URL is definitive ---
+            auth_indicators = ("login", "authwall", "checkpoint", "signup", "uas/login")
+            if any(x in current_url for x in auth_indicators):
+                click.echo("[debug] Redirected to auth page — session is invalid")
+                return False
+
+            feed_indicators = ("/feed", "/in/", "mynetwork", "/jobs", "/messaging", "/notifications")
+            if any(x in current_url for x in feed_indicators):
+                click.echo("[debug] On feed/profile URL — authenticated ✓")
+                return True
+
+            # --- Step 2: Ambiguous URL — check DOM ---
+            click.echo(f"[debug] Ambiguous URL ({current_url}), checking DOM...")
+            feed_selector = get_all_selectors("feed_indicator")
+            try:
+                await self._page.wait_for_selector(feed_selector, timeout=WAIT_TIMES["very_long"])
+                click.echo("[debug] Feed element appeared — authenticated ✓")
+                return True
+            except Exception:
+                pass
+
             login_selector = get_all_selectors("login_indicator")
             login_element = await self._page.query_selector(login_selector)
             if login_element:
+                click.echo("[debug] Login form found in DOM — not authenticated")
                 return False
 
-            # Check for feed (indicates authenticated)
-            feed_selector = get_all_selectors("feed_indicator")
-            feed_element = await self._page.query_selector(feed_selector)
-            return feed_element is not None
-
-        except Exception:
+            click.echo("[debug] Could not determine auth state — assuming not authenticated")
             return False
 
-    async def _click_start_post(self, attempt: int = 1) -> None:
-        """Click the "Start a post" button.
+        except Exception as e:
+            click.echo(f"[debug] is_authenticated error: {e}")
+            return False
+
+    async def save_session(self, path: Path) -> None:
+        """Export cookies and localStorage to a portable JSON file.
+
+        This JSON can be loaded by any browser mode (headed or headless)
+        via new_context(storage_state=path), avoiding Chrome profile
+        directory incompatibilities between Chromium and headless-shell.
 
         Args:
-            attempt: Retry attempt number (affects selector choice)
-
-        Raises:
-            PublishError: If button cannot be clicked
+            path: Destination path for storage_state.json.
         """
-        selector = get_selector_with_fallbacks("start_post_button", attempt)
+        if not self._context:
+            raise RuntimeError("Publisher not initialized. Call initialize() first.")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        await self._context.storage_state(path=str(path))
+        click.echo(f"[debug] Session exported to: {path}")
+
+    async def wait_for_login(
+        self,
+        timeout_ms: int = 300_000,
+        storage_state_path: Optional[Path] = None,
+    ) -> bool:
+        """Navigate to the login page once and wait for the user to log in manually.
+
+        Does NOT poll or re-navigate. Uses Playwright's wait_for_url() to
+        passively detect when the browser reaches a post-login page, then
+        exports storage_state.json so run/watch can load the session without
+        relying on the Chrome profile directory.
+
+        Args:
+            timeout_ms: Maximum wait time in milliseconds (default: 5 minutes).
+            storage_state_path: Where to export the session JSON after login.
+
+        Returns:
+            True if login was detected (and session saved), False if timed out.
+        """
+        if not self._page:
+            raise RuntimeError("Publisher not initialized. Call initialize() first.")
+
+        click.echo(f"[debug] Navigating to: {URLS['login']}")
+        await self._page.goto(URLS["login"], wait_until="domcontentloaded")
+
+        # Matches /feed/, /in/<username>, /mynetwork, /jobs, /messaging, /notifications.
+        post_login_pattern = re.compile(
+            r"linkedin\.com/(feed|in/|mynetwork|jobs|messaging|notifications)"
+        )
 
         try:
-            # Wait for selector to be visible
-            await self._page.wait_for_selector(selector, timeout=WAIT_TIMES["long"])
-            await self._page.click(selector)
-            await self._page.wait_for_timeout(WAIT_TIMES["medium"])
+            await self._page.wait_for_url(post_login_pattern, timeout=timeout_ms)
+            click.echo(f"[debug] Login detected — URL: {self._page.url}")
+            if storage_state_path:
+                await self.save_session(storage_state_path)
+            return True
         except Exception as e:
-            raise PublishError(
-                f"Failed to click start post button: {e}",
-                retry_count=attempt,
-                retryable=True,
-            )
+            click.echo(f"[debug] wait_for_login timeout/error: {e}")
+            return False
+
+    async def _dismiss_overlays(self) -> None:
+        """Silently dismiss cookie banners and consent dialogs.
+
+        Tries each cookie-banner selector with a short probe timeout.
+        Never raises — if nothing is found, execution continues normally.
+        """
+        for selector in SELECTORS["cookie_banner"]:
+            try:
+                element = await self._page.query_selector(selector)
+                if element:
+                    await element.click()
+                    click.echo(f"[debug] Dismissed overlay: {selector}")
+                    await self._page.wait_for_timeout(500)
+                    return
+            except Exception:
+                continue
+        click.echo("[debug] No overlays to dismiss")
+
+    async def _find_and_click(
+        self,
+        selector_key: str,
+        action_name: str,
+        after_click_wait: int = WAIT_TIMES["medium"],
+    ) -> str:
+        """Try every selector for `selector_key` in order, click the first visible one.
+
+        Each selector is probed with a short per-selector timeout
+        (WAIT_TIMES["per_selector"]) so the full list is scanned
+        quickly without a long stall on a single missing element.
+
+        Args:
+            selector_key: Key into SELECTORS dict.
+            action_name: Human-readable name used in error messages.
+            after_click_wait: How long to wait after a successful click.
+
+        Returns:
+            The selector string that matched.
+
+        Raises:
+            PublishError: If no selector matched.
+        """
+        selectors = SELECTORS[selector_key]
+        last_error: Optional[Exception] = None
+
+        for selector in selectors:
+            try:
+                click.echo(f"[debug] Trying {action_name} selector: {selector}")
+                await self._page.wait_for_selector(
+                    selector,
+                    state="visible",
+                    timeout=WAIT_TIMES["per_selector"],
+                )
+                await self._page.click(selector)
+                click.echo(f"[debug] {action_name} clicked with: {selector}")
+                await self._page.wait_for_timeout(after_click_wait)
+                return selector
+            except Exception as e:
+                click.echo(f"[debug]   ✗ {selector}")
+                last_error = e
+
+        raise PublishError(
+            f"Failed to {action_name}: no selector matched out of "
+            f"{len(selectors)} tried. Last error: {last_error}",
+            retryable=True,
+        )
+
+    async def _click_start_post(self, attempt: int = 1) -> None:
+        """Click the "Start a post" button using all available selectors.
+
+        Args:
+            attempt: Retry attempt number (passed to PublishError for logging).
+
+        Raises:
+            PublishError: If no selector matched.
+        """
+        try:
+            await self._find_and_click("start_post_button", "click start-post button")
+        except PublishError as e:
+            raise PublishError(str(e), retry_count=attempt, retryable=True)
 
     async def _enter_content(self, content: str, attempt: int = 1) -> None:
-        """Type content into post editor.
+        """Type post content into the composer editor.
 
         Args:
-            content: Post content to type
-            attempt: Retry attempt number
+            content: Text to type.
+            attempt: Retry attempt number.
 
         Raises:
-            PublishError: If content cannot be entered
+            PublishError: If the editor could not be found or typed into.
         """
-        selector = get_selector_with_fallbacks("post_editor", attempt)
+        selectors = SELECTORS["post_editor"]
+        last_error: Optional[Exception] = None
 
-        try:
-            # Wait for editor to be visible
-            await self._page.wait_for_selector(selector, timeout=WAIT_TIMES["long"])
+        for selector in selectors:
+            try:
+                click.echo(f"[debug] Trying editor selector: {selector}")
+                await self._page.wait_for_selector(
+                    selector,
+                    state="visible",
+                    timeout=WAIT_TIMES["per_selector"],
+                )
+                await self._page.click(selector)
+                await self._page.wait_for_timeout(WAIT_TIMES["short"])
+                await self._page.type(selector, content, delay=20)
+                await self._page.wait_for_timeout(WAIT_TIMES["short"])
+                click.echo(f"[debug] Content typed with: {selector}")
+                return
+            except Exception as e:
+                click.echo(f"[debug]   ✗ {selector}")
+                last_error = e
 
-            # Click to focus
-            await self._page.click(selector)
-            await self._page.wait_for_timeout(WAIT_TIMES["short"])
-
-            # Type content with realistic delay
-            await self._page.type(selector, content, delay=20)
-            await self._page.wait_for_timeout(WAIT_TIMES["short"])
-
-        except Exception as e:
-            raise PublishError(
-                f"Failed to enter content: {e}",
-                retry_count=attempt,
-                retryable=True,
-            )
+        raise PublishError(
+            f"Failed to enter content: no editor selector matched. Last error: {last_error}",
+            retry_count=attempt,
+            retryable=True,
+        )
 
     async def _click_post_button(self, attempt: int = 1) -> None:
-        """Click the "Post" button to submit.
+        """Click the submit "Post" button inside the composer modal.
 
         Args:
-            attempt: Retry attempt number
+            attempt: Retry attempt number.
 
         Raises:
-            PublishError: If post button cannot be clicked
+            PublishError: If the Post button could not be found or clicked.
         """
-        selector = get_selector_with_fallbacks("post_button", attempt)
-
         try:
-            # Wait for button to be visible and enabled
-            await self._page.wait_for_selector(selector, timeout=WAIT_TIMES["long"])
-            await self._page.wait_for_timeout(WAIT_TIMES["short"])
-
-            # Click post button
-            await self._page.click(selector)
-
-            # Wait for post to be submitted
-            await self._page.wait_for_timeout(WAIT_TIMES["very_long"])
-
-        except Exception as e:
-            raise PublishError(
-                f"Failed to click post button: {e}",
-                retry_count=attempt,
-                retryable=True,
+            await self._find_and_click(
+                "post_button",
+                "click Post button",
+                after_click_wait=WAIT_TIMES["very_long"],
             )
+        except PublishError as e:
+            raise PublishError(str(e), retry_count=attempt, retryable=True)
 
     async def _extract_post_url(self) -> Optional[str]:
         """Attempt to extract the URL of the newly published post.
@@ -234,13 +409,19 @@ class LinkedInPublisher:
         start_time = time.time()
 
         try:
-            # Check authentication
+            # Check authentication (navigates to feed, confirms we land there)
             if not await self.is_authenticated():
                 raise AuthenticationError("LinkedIn session expired. Run 'linkedin-publish auth' to re-authenticate.")
 
-            # Navigate to home/feed
-            await self._page.goto(URLS["home"], wait_until="domcontentloaded")
+            # Re-navigate to feed with a full load wait so the composer is ready.
+            # is_authenticated() leaves us on the feed, but a second goto with
+            # wait_until="load" gives the JS time to fully hydrate the page.
+            click.echo("[debug] Loading feed page before posting...")
+            await self._page.goto(URLS["home"], wait_until="load")
             await self._page.wait_for_timeout(WAIT_TIMES["medium"])
+
+            # Dismiss cookie banners / consent dialogs before interacting
+            await self._dismiss_overlays()
 
             # Click start post
             await self._click_start_post()
@@ -368,15 +549,17 @@ class LinkedInPublisher:
         )
 
     async def close(self) -> None:
-        """Close browser and save session.
-
-        Session data is automatically persisted by Playwright's
-        persistent context.
-        """
+        """Close browser and release Playwright resources."""
         if self._context:
             await self._context.close()
             self._context = None
             self._page = None
+
+        # _browser is only set when using launch() + new_context().
+        # launch_persistent_context() returns the context directly (no separate browser object).
+        if self._browser:
+            await self._browser.close()
+            self._browser = None
 
         if self._playwright:
             await self._playwright.stop()

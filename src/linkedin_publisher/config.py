@@ -45,6 +45,15 @@ class LinkedInPublisherConfig:
             self.state_path = Path(self.state_path)
 
     @property
+    def storage_state_path(self) -> Path:
+        """Path to portable session JSON (cookies + localStorage).
+
+        Exported by auth, loaded by run/watch. Avoids headed-vs-headless
+        Chrome profile incompatibility.
+        """
+        return self.session_path.parent / "storage_state.json"
+
+    @property
     def approved_path(self) -> Path:
         """Path to /Approved/linkedin/ directory."""
         return self.vault_path / "Approved" / "linkedin"

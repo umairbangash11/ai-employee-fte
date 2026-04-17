@@ -100,7 +100,11 @@ async def process_approved_file(
 
         # Initialize publisher if needed
         if own_publisher:
-            publisher = LinkedInPublisher(config.session_path, config.headless)
+            publisher = LinkedInPublisher(
+                config.session_path,
+                config.headless,
+                storage_state_path=config.storage_state_path,
+            )
             await publisher.initialize()
 
         # Log publishing attempt
@@ -212,11 +216,10 @@ def cli(ctx, vault_path: Optional[Path], headless: bool, verbose: bool):
             config = LinkedInPublisherConfig.from_env()
             config.headless = headless
             config.verbose = verbose
-        except ValueError as e:
-            if ctx.invoked_subcommand not in (None, "help"):
-                click.echo(f"Error: {e}", err=True)
-                click.echo("Set VAULT_PATH environment variable or use --vault-path option", err=True)
-                ctx.exit(1)
+        except ValueError:
+            # Don't exit here — subcommands check `if not config` themselves.
+            # Exiting in the group callback prevents --help from working on
+            # subcommands when VAULT_PATH is unset.
             config = None
 
     ctx.obj["config"] = config
@@ -259,7 +262,14 @@ def run(ctx):
     async def process_all():
         nonlocal success_count, fail_count
 
-        publisher = LinkedInPublisher(config.session_path, config.headless)
+        click.echo(f"[debug] Session file: {config.storage_state_path}")
+        click.echo(f"[debug] Session exists: {config.storage_state_path.exists()}")
+
+        publisher = LinkedInPublisher(
+            config.session_path,
+            config.headless,
+            storage_state_path=config.storage_state_path,
+        )
         await publisher.initialize()
 
         try:
@@ -338,49 +348,69 @@ def status(ctx):
 
 
 @cli.command()
+@click.option(
+    "--timeout",
+    default=300,
+    type=int,
+    help="Seconds to wait for login (default: 300)",
+)
 @click.pass_context
-def auth(ctx):
+def auth(ctx, timeout: int):
     """Authenticate with LinkedIn.
 
-    Runs in headed mode, navigates to LinkedIn, and waits for
-    manual login. Session is saved for future headless runs.
+    Opens a headed browser, navigates to the LinkedIn login page once,
+    and waits — without refreshing — for you to log in manually.
+    When your feed appears, the session is saved automatically.
     """
     config: LinkedInPublisherConfig = ctx.obj["config"]
 
     if not config:
         ctx.exit(1)
 
-    click.echo("Starting LinkedIn authentication...")
-    click.echo("A browser window will open. Please log in to LinkedIn.")
-    click.echo("Press Ctrl+C when done.\n")
+    click.echo("─" * 55)
+    click.echo("  LinkedIn Authentication")
+    click.echo("─" * 55)
+    click.echo("1. A browser window will open at the LinkedIn login page.")
+    click.echo("2. Enter your credentials (and complete 2FA if prompted).")
+    click.echo("3. Do NOT close the browser — this script detects login")
+    click.echo("   automatically when your feed loads.")
+    click.echo(f"4. Timeout: {timeout} seconds.")
+    click.echo("─" * 55 + "\n")
+
+    success = False
 
     async def do_auth():
-        # Force headed mode
+        nonlocal success
+        # Always force headed mode for auth regardless of config/env.
         publisher = LinkedInPublisher(config.session_path, headless=False)
         await publisher.initialize()
 
         try:
-            # Navigate to LinkedIn
-            if publisher._page:
-                await publisher._page.goto("https://www.linkedin.com/login")
-                click.echo("Waiting for login...")
-
-                # Wait for user to complete login
-                while True:
-                    if await publisher.is_authenticated():
-                        click.echo("\nAuthentication successful! Session saved.")
-                        break
-                    await asyncio.sleep(2)
-
-        except KeyboardInterrupt:
-            click.echo("\nAuthentication cancelled.")
+            click.echo("Browser opened. Navigating to LinkedIn login page...")
+            success = await publisher.wait_for_login(
+                timeout_ms=timeout * 1000,
+                storage_state_path=config.storage_state_path,
+            )
         finally:
             await publisher.close()
 
     try:
         asyncio.run(do_auth())
     except KeyboardInterrupt:
-        click.echo("\nAuthentication cancelled.")
+        click.echo("\nAuthentication cancelled by user.")
+        return
+
+    if success:
+        click.echo("\nLogin detected — session saved successfully.")
+        click.echo(f"Session file : {config.storage_state_path}")
+        click.echo("\nYou can now run headless publishing:")
+        click.echo("  linkedin-publish --vault-path vault/ run")
+    else:
+        click.echo(
+            f"\nTimeout: login was not detected within {timeout} seconds.",
+            err=True,
+        )
+        click.echo("Run the command again and complete login before the timeout.", err=True)
 
 
 @cli.command()
@@ -435,7 +465,11 @@ def watch(ctx, poll_interval: int):
 
     async def process_queue():
         """Process files from queue."""
-        publisher = LinkedInPublisher(config.session_path, config.headless)
+        publisher = LinkedInPublisher(
+            config.session_path,
+            config.headless,
+            storage_state_path=config.storage_state_path,
+        )
         await publisher.initialize()
 
         try:
