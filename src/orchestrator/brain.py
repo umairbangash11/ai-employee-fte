@@ -49,6 +49,7 @@ from watchdog.observers import Observer
 from sentinel.logger import write_log_entry
 from sentinel.mover import deduplicate_filename
 from sentinel.planner import write_execution_plan
+from orchestrator.plan_writer import write_runtime_plan
 
 
 ASSISTANT_SYSTEM_PROMPT = """\
@@ -232,6 +233,7 @@ class InboxTriageHandler(FileSystemEventHandler):
         self.inbox_dir = self.vault_path / "Inbox"
         self.needs_action_dir = self.vault_path / "Needs_Action"
         self.drafts_dir = self.needs_action_dir / "drafts"
+        self.plans_dir = self.needs_action_dir / "plans"
         self.approved_dir = self.vault_path / "Approved"
         self.logs_dir = self.vault_path / "Logs"
         self.client = client
@@ -368,6 +370,16 @@ class InboxTriageHandler(FileSystemEventHandler):
             ),
         )
 
+        # Write runtime reasoning plan to Needs_Action/plans/
+        plan_path = write_runtime_plan(
+            plans_dir=self.plans_dir,
+            source_filename=filename,
+            email_meta=email_meta,
+            classification=classification,
+        )
+        if plan_path is None:
+            print(f"  Warning: runtime plan write failed for {filename}")
+
         # Move the email
         shutil.move(str(filepath), str(dest_path))
 
@@ -380,6 +392,7 @@ class InboxTriageHandler(FileSystemEventHandler):
         )
 
         # Log the action
+        plan_name = plan_path.name if plan_path else "none"
         write_log_entry(
             logs_dir=self.logs_dir,
             action_type="email_triaged",
@@ -389,14 +402,16 @@ class InboxTriageHandler(FileSystemEventHandler):
             outcome="success",
             details=(
                 f"Reply needed. Reason: {classification['reason']}. "
-                f"Draft: {draft_path.name}"
+                f"Draft: {draft_path.name}. "
+                f"Plan: {plan_name}"
             ),
         )
 
         print(
             f"  Reply needed: {classification['reason']}\n"
             f"  Moved to: {dest_path.relative_to(self.vault_path)}\n"
-            f"  Draft: {draft_path.relative_to(self.vault_path)}"
+            f"  Draft: {draft_path.relative_to(self.vault_path)}\n"
+            f"  Plan: {plan_path.relative_to(self.vault_path) if plan_path else 'none'}"
         )
 
 

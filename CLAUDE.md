@@ -274,6 +274,15 @@ See `.specify/memory/constitution.md` for code quality, testing, performance, se
 - Local filesystem (Markdown files in vault folders) (001-vault-sentinel)
 - Python 3.12 + google-api-python-client, google-auth, google-auth-oauthlib, pyyaml, python-dotenv (003-gmail-api-oauth)
 - Local filesystem (JSON for tokens/state, Markdown for emails) (003-gmail-api-oauth)
+- Python 3.12 + `mcp>=1.0` (MCP Python SDK — not yet installed), `python-dotenv>=1.0` (already installed) (009-vault-mcp-server)
+- Local filesystem — vault directory defined by `VAULT_PATH` env var (009-vault-mcp-server)
+- Python 3.12 + stdlib only (`pathlib`, `datetime`, `re`) — no new packages (010-runtime-plan-gen)
+- Local filesystem — `vault/Needs_Action/plans/` subdirectory (010-runtime-plan-gen)
+- Python 3.12 (project standard) + `xmlrpc.client` (stdlib — Odoo XML-RPC API), (012-odoo-accounting)
+- Local filesystem — `vault/` directory tree; Odoo Community instance (012-odoo-accounting)
+- Python 3.12 + `playwright` (async_api), `watchdog>=6.0`, `python-dotenv`, `pyyaml`, `click` (013-social-media-expansion)
+- Local filesystem — vault directories under `VAULT_PATH` env var; Playwright session state in `.watcher-state/<platform>/storage_state.json` (013-social-media-expansion)
+- Local filesystem (vault directories under `VAULT_PATH`) (014-ceo-briefing-generation)
 
 ## Skill: WatcherInfrastructure (Silver Tier — ratified)
 
@@ -357,6 +366,6 @@ Each watcher follows this pattern:
 - No message deletion or modification at source
 
 ## Recent Changes
-- 003-gmail-api-oauth: Added Python 3.12 + google-api-python-client, google-auth, google-auth-oauthlib, pyyaml, python-dotenv
-- 002-inbox-router: Rule-based router for email triage (Inbox → Needs_Action) with flag/keyword/SLA rules
-- Logic Orchestrator (brain.py): Switched from Anthropic to OpenAI SDK (gpt-4o) for email triage
+- 014-ceo-briefing-generation: Added Python 3.12 (project standard)
+- 013-social-media-expansion: Added Python 3.12 + `playwright` (async_api), `watchdog>=6.0`, `python-dotenv`, `pyyaml`, `click`
+- 012-odoo-accounting: Added Python 3.12 (project standard) + `xmlrpc.client` (stdlib — Odoo XML-RPC API),

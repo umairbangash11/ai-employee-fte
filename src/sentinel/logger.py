@@ -31,8 +31,11 @@ def write_log_entry(
         f"---\n"
         f'log_id: "{filename_ts}-{action_type}-{slug}"\n'
         f'timestamp: "{timestamp}"\n'
-        f"action: {action_type}\n"
+        f"action_type: {action_type}\n"
+        f'source_path: "{source_path}"\n'
+        f'dest_path: "{dest_path}"\n'
         f"outcome: {outcome}\n"
+        f'details: "{details}"\n'
         f"---\n"
         f"\n"
         f"## {action_type.replace('_', ' ').title()}\n"

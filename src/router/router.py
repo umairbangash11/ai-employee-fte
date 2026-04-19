@@ -182,6 +182,7 @@ def _write_routing_log(
     timestamp = datetime.now().isoformat()
     log_id = f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-routed-{source.stem}"
 
+    rules_summary = ", ".join(matched_rules) if matched_rules else "none"
     log_content = f"""---
 log_id: "{log_id}"
 timestamp: "{timestamp}"
@@ -190,6 +191,7 @@ source_path: "{source}"
 dest_path: "{destination}"
 matched_rules: {matched_rules}
 outcome: success
+details: "Routed by rules: {rules_summary}"
 ---
 """
 

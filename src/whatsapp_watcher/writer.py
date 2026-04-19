@@ -96,6 +96,7 @@ def build_frontmatter(message: WhatsAppMessage, urgency: str, captured_at: datet
         "source": "whatsapp",
         "captured_at": captured_at.isoformat(),
         "sender": message.sender,
+        "subject": message.chat_name,
         "chat_name": message.chat_name,
         "chat_type": message.chat_type,
         "message_timestamp": message.timestamp.isoformat(),
