@@ -44,6 +44,7 @@ odoo-mcp = "odoo_mcp.__main__:main"
 odoo-executor = "odoo_accounting.executor:main"
 instagram-executor = "instagram_publisher.__main__:cli"
 x-executor = "x_publisher.__main__:cli"
+sentinel-briefing = "briefing_generator.__main__:cli"
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
