@@ -17,6 +17,17 @@ from playwright.async_api import async_playwright
 
 from . import config as cfg
 from . import scraper, session, state, writer
+from .watcher import (
+    create_health_manager,
+    create_whatsapp_circuit_breaker,
+    translate_whatsapp_error,
+)
+from resilience import (
+    ExitCode,
+    FailureCategory,
+    ResilienceError,
+    async_ralph_wiggum_loop,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -40,7 +51,37 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run single poll cycle then exit",
     )
+    # Resilience integration (Feature 015, T076)
+    parser.add_argument(
+        "--health-file",
+        type=Path,
+        default=Path("./.watcher-state/whatsapp_watcher_health.json"),
+        help="Path to health status JSON (read by sentinel-status)",
+    )
+    parser.add_argument(
+        "--log-dir",
+        type=Path,
+        default=Path("./vault/Logs"),
+        help="Directory for structured failure logs (FR-005)",
+    )
     return parser.parse_args()
+
+
+def _exit_code_for(error: ResilienceError) -> int:
+    """Map a ResilienceError category to a standardized ExitCode integer (T077)."""
+    if error.category in (
+        FailureCategory.CREDENTIALS_INVALID,
+        FailureCategory.RESOURCE_UNAVAILABLE,
+    ):
+        return ExitCode.CONFIGURATION.value
+    if error.category in (
+        FailureCategory.TRANSIENT_NETWORK,
+        FailureCategory.RATE_LIMITED,
+        FailureCategory.EXTERNAL_SERVICE_DOWN,
+        FailureCategory.SESSION_EXPIRED,
+    ):
+        return ExitCode.RECOVERABLE.value
+    return ExitCode.FATAL.value
 
 
 async def run_auth_mode(config: cfg.WatcherConfig) -> int:
@@ -68,17 +109,23 @@ async def run_auth_mode(config: cfg.WatcherConfig) -> int:
             # Close browser
             await context.close()
 
-        return 0
+        return ExitCode.SUCCESS.value
 
     except session.QRTimeoutError as e:
         print(f"ERROR: {e.message}", file=sys.stderr)
-        return 1
+        return ExitCode.CONFIGURATION.value
     except Exception as e:
-        print(f"ERROR: Authentication failed: {e}", file=sys.stderr)
-        return 1
+        translated = translate_whatsapp_error(e)
+        print(f"ERROR: {translated.message}", file=sys.stderr)
+        return _exit_code_for(translated)
 
 
-async def run_poll_cycle(page, config: cfg.WatcherConfig, dedup_state: state.DeduplicationState) -> dict:
+async def run_poll_cycle(
+    page,
+    config: cfg.WatcherConfig,
+    dedup_state: state.DeduplicationState,
+    health=None,
+) -> dict:
     """Execute single poll cycle.
 
     Algorithm:
@@ -108,8 +155,10 @@ async def run_poll_cycle(page, config: cfg.WatcherConfig, dedup_state: state.Ded
     captured_at = datetime.now()
 
     try:
-        # Scrape messages
+        # Scrape messages (T071/T072 — health accounting per attempt)
         all_messages = await scraper.scrape_unread_messages(page, config)
+        if health is not None:
+            health.record_success()
         stats["scraped"] = len(all_messages)
 
         if not all_messages:
@@ -143,13 +192,28 @@ async def run_poll_cycle(page, config: cfg.WatcherConfig, dedup_state: state.Ded
             state.save_dedup_state(dedup_state, config)
 
     except Exception as e:
-        print(f"Poll cycle error: {e}", file=sys.stderr)
+        translated = translate_whatsapp_error(e)
+        print(f"Poll cycle error: {translated.message}", file=sys.stderr)
+        if health is not None:
+            health.record_failure(translated.message)
         stats["errors"] += 1
+        # Re-raise as a ResilienceError so the outer async_ralph_wiggum_loop
+        # can consult its retryable flag (T071 + T075).
+        raise translated from e
+    finally:
+        # T073: heartbeat every poll cycle, success or failure.
+        if health is not None:
+            health.heartbeat()
 
     return stats
 
 
-async def run_polling_mode(config: cfg.WatcherConfig, run_once: bool = False) -> int:
+async def run_polling_mode(
+    config: cfg.WatcherConfig,
+    run_once: bool = False,
+    health=None,
+    circuit=None,
+) -> int:
     """Run continuous polling mode.
 
     Algorithm:
@@ -191,20 +255,30 @@ async def run_polling_mode(config: cfg.WatcherConfig, run_once: bool = False) ->
                 cycle_count += 1
                 print(f"\n--- Poll Cycle {cycle_count} Start ---", file=sys.stderr)
 
-                # Run poll cycle with retry
+                # Run poll cycle with resilience (T071 — shared ralph_wiggum_loop
+                # replaces the inline 3-attempt retry).
                 stats = None
-                for attempt in range(3):
-                    try:
-                        stats = await run_poll_cycle(page, config, dedup_state)
-                        break
-                    except Exception as e:
-                        if attempt < 2:
-                            delay = 2 ** attempt  # 1s, 2s
-                            print(f"Poll cycle attempt {attempt+1}/3 failed: {e}. Retrying in {delay}s...", file=sys.stderr)
-                            await asyncio.sleep(delay)
-                        else:
-                            print(f"Poll cycle failed after 3 attempts: {e}", file=sys.stderr)
-                            stats = {"scraped": 0, "new": 0, "written": 0, "duplicates": 0, "errors": 1}
+                try:
+                    stats = await async_ralph_wiggum_loop(
+                        operation=lambda: run_poll_cycle(page, config, dedup_state, health=health),
+                    )
+                    if circuit is not None:
+                        circuit.record_success()
+                except ResilienceError as exc:
+                    if circuit is not None:
+                        circuit.record_failure()
+                        if health is not None:
+                            health.set_circuit_state(circuit.state)
+                    print(f"Poll cycle failed after retries: {exc.message}", file=sys.stderr)
+                    stats = {"scraped": 0, "new": 0, "written": 0, "duplicates": 0, "errors": 1}
+                except Exception as exc:
+                    translated = translate_whatsapp_error(exc)
+                    if circuit is not None:
+                        circuit.record_failure()
+                        if health is not None:
+                            health.set_circuit_state(circuit.state)
+                    print(f"Poll cycle failed: {translated.message}", file=sys.stderr)
+                    stats = {"scraped": 0, "new": 0, "written": 0, "duplicates": 0, "errors": 1}
 
                 # Log stats
                 if stats:
@@ -224,17 +298,21 @@ async def run_polling_mode(config: cfg.WatcherConfig, run_once: bool = False) ->
             # Clean shutdown
             await context.close()
 
-        return 0
+        return ExitCode.SUCCESS.value
 
     except session.SessionExpiredError as e:
         print(f"ERROR: {e.message}", file=sys.stderr)
-        return 1
+        return ExitCode.RECOVERABLE.value
     except KeyboardInterrupt:
         print("\nShutting down gracefully...", file=sys.stderr)
-        return 0
+        return ExitCode.SUCCESS.value
+    except ResilienceError as e:
+        print(f"ERROR: {e.message}", file=sys.stderr)
+        return _exit_code_for(e)
     except Exception as e:
-        print(f"ERROR: Polling failed: {e}", file=sys.stderr)
-        return 1
+        translated = translate_whatsapp_error(e)
+        print(f"ERROR: Polling failed: {translated.message}", file=sys.stderr)
+        return _exit_code_for(translated)
 
 
 def main() -> int:
@@ -253,13 +331,18 @@ def main() -> int:
         headless=not args.auth  # headless=False for --auth
     )
 
+    # Build resilience context (T070, T076 — honours --health-file).
+    health = create_health_manager(state_dir=args.health_file.parent)
+    circuit = create_whatsapp_circuit_breaker()
+    health.set_circuit_state(circuit.state)
+
     # Branch based on mode
     if args.auth:
         return asyncio.run(run_auth_mode(config))
     elif args.once or args.dry_run:
-        return asyncio.run(run_polling_mode(config, run_once=True))
+        return asyncio.run(run_polling_mode(config, run_once=True, health=health, circuit=circuit))
     else:
-        return asyncio.run(run_polling_mode(config, run_once=False))
+        return asyncio.run(run_polling_mode(config, run_once=False, health=health, circuit=circuit))
 
 
 if __name__ == "__main__":

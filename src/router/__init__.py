@@ -12,6 +12,16 @@ Public API:
     - move_file_to_needs_action: Atomic file move with claim-by-move
 """
 
+# Resilience module integration (Feature 015, T078)
+from resilience import (
+    ExitCode,
+    HealthManager,
+    ResilienceError,
+    exit_with_code,
+    ralph_wiggum_loop,
+    route_to_failed_queue,
+)
+
 from router.config import RouterConfig, load_router_config
 from router.parser import (
     EmailFrontmatter,

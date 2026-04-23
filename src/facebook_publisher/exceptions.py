@@ -1,10 +1,31 @@
-"""Custom exceptions for Facebook Publisher."""
+"""Custom exceptions for Facebook Publisher.
+
+Feature 015 / T107: the base class now inherits from `resilience.ResilienceError`
+so the shared hierarchy is available on every Facebook publisher exception.
+"""
+
+from resilience import ResilienceError
+from resilience.exceptions import FailureCategory
 
 
-class FacebookPublishError(Exception):
-    """Base exception for Facebook publishing errors."""
+class FacebookPublishError(ResilienceError):
+    """Base exception for Facebook publishing errors (now a ResilienceError)."""
 
-    pass
+    def __init__(
+        self,
+        message: str = "",
+        error_code: str = "ERR_FACEBOOK_PUBLISH",
+        category: FailureCategory = FailureCategory.INTERNAL_ERROR,
+        retryable: bool = False,
+        **kwargs,
+    ):
+        super().__init__(
+            error_code=error_code,
+            category=category,
+            message=message,
+            retryable=retryable,
+            **kwargs,
+        )
 
 
 class SessionExpiredError(FacebookPublishError):

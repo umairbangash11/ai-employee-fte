@@ -13,6 +13,37 @@ Usage:
     linkedin-publish auth      # Authenticate with LinkedIn
 """
 
+# Resilience module integration (Feature 015, T100)
+from pathlib import Path as _Path
+
+from resilience import (
+    CircuitBreaker,
+    ExitCode,
+    HealthManager,
+    ResilienceError,
+    async_ralph_wiggum_loop,
+    async_retry_with_backoff,
+    exit_with_code,
+    route_to_failed_queue,
+)
+
+__version__ = "0.1.0"
+
+
+def create_linkedin_health_manager(
+    state_dir: _Path = _Path(".watcher-state"),
+) -> HealthManager:
+    """Factory for linkedin_publisher's HealthManager (T102)."""
+    return HealthManager(
+        subsystem="linkedin_publisher", state_dir=state_dir, version=__version__,
+    )
+
+
+def create_linkedin_circuit_breaker(name: str = "linkedin_api") -> CircuitBreaker:
+    """Factory for LinkedIn API CircuitBreaker (T103)."""
+    return CircuitBreaker(name=name)
+
+
 from .config import LinkedInPublisherConfig
 from .models import ApprovedPost, PublishResult, ExecutionState
 from .exceptions import (

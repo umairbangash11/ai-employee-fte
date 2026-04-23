@@ -472,7 +472,8 @@ def watch(ctx, poll_interval: int):
         click.echo("\nStopping...")
         stop_event.set()
         detector.stop()
-        sys.exit(0)
+        from resilience import ExitCode
+        sys.exit(ExitCode.SUCCESS.value)
 
     signal.signal(signal.SIGINT, handle_sigint)
 

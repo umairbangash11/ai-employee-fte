@@ -321,7 +321,8 @@ def auth(ctx: click.Context) -> None:
         click.echo("\nAuthentication successful! You can now run headless commands.")
     else:
         click.echo("\nAuthentication failed. Please try again.")
-        sys.exit(1)
+        from resilience import ExitCode
+        sys.exit(ExitCode.CONFIGURATION.value)
 
 
 if __name__ == "__main__":

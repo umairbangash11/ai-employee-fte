@@ -357,6 +357,6 @@ Each watcher follows this pattern:
 - No message deletion or modification at source
 
 ## Recent Changes
+- 001-vault-sentinel: Added [if applicable, e.g., PostgreSQL, CoreData, files or N/A]
 - 003-gmail-api-oauth: Added Python 3.12 + google-api-python-client, google-auth, google-auth-oauthlib, pyyaml, python-dotenv
 - 002-inbox-router: Rule-based router for email triage (Inbox → Needs_Action) with flag/keyword/SLA rules
-- Logic Orchestrator (brain.py): Switched from Anthropic to OpenAI SDK (gpt-4o) for email triage

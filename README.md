@@ -60,6 +60,18 @@ AI Employee FTE is built around an **Obsidian vault** as its central workspace. 
 - **Facebook Publisher** - Publishes approved posts via Playwright
 - **Email Drafts** - Prepares draft replies for human review and sending
 
+### Resilience Layer (Feature 015)
+Every subsystem is wrapped by a shared resilience module that handles transient failures uniformly and surfaces health state to external watchdogs.
+
+- **Retry with exponential backoff** — `ralph_wiggum_loop()` implements Constitution Principle V (3 attempts + simplified fallback + jitter).
+- **Circuit breaker** — external APIs (Gmail, OpenAI, LinkedIn, Facebook) are protected by a `CircuitBreaker` that fast-fails after 5 failures in 60s, auto-retries after 30s (`HALF_OPEN` probe).
+- **Structured failure logs** — every failure writes a Markdown file to `vault/Logs/` with YAML frontmatter matching FR-005 schema (log_id, timestamp, subsystem, failure_category, error_code, retry_count, is_final_failure).
+- **Failed-item routing** — items whose processing exhausts retries are moved to `Needs_Action/<source>/failed/` with a recovery wrapper preserving the original content.
+- **Health files** — each subsystem writes `.watcher-state/<subsystem>_health.json` per poll; `sentinel-status` aggregates across all 7 subsystems.
+- **Standardized exit codes** — 0=success, 1=recoverable, 2=configuration, 3=fatal. PM2/systemd can key restart policy on the exit code.
+
+See [`specs/015-error-recovery-resilience/quickstart.md`](specs/015-error-recovery-resilience/quickstart.md) for the full operator guide.
+
 ## Vault Structure
 
 The system uses a canonical folder structure:
@@ -193,6 +205,8 @@ facebook-publish watch
 
 ## CLI Commands
 
+### Core pipeline
+
 | Command | Description |
 |---------|-------------|
 | `sentinel init` | Initialize vault folder structure |
@@ -203,6 +217,18 @@ facebook-publish watch
 | `hitl-approval` | Manage approval workflow |
 | `linkedin-publish` | LinkedIn publishing automation |
 | `facebook-publish` | Facebook publishing automation |
+
+### Resilience / operator CLIs (Feature 015)
+
+| Command | Description |
+|---------|-------------|
+| `sentinel-status` | Aggregate health across all subsystems (reads `.watcher-state/*_health.json`). `--json` for machine-readable output, `--subsystem NAME` to filter, `--state-dir PATH` to point at an alternate state dir. Exit: 0=healthy, 1=degraded, 2=unhealthy. |
+| `sentinel-recover list` | List all items in `Needs_Action/*/failed/`. Supports `--subsystem`, `--since`, `--json`. |
+| `sentinel-recover retry PATH` | Re-queue a single failed item; `--force` allows re-queuing non-retryable items. |
+| `sentinel-recover retry-all --subsystem NAME` | Re-queue every failed item for a subsystem. `--dry-run` to preview. |
+| `sentinel-recover purge --older-than N` | Delete wrappers older than N days (integer). `--dry-run`, `--yes`, `--subsystem` available. Always creates a backup tarball under `.watcher-state/`. |
+
+Each watcher `__main__` also exposes `--health-file` and `--log-dir` flags for external watchdog integration (PM2/systemd).
 
 ## Configuration
 
@@ -237,8 +263,10 @@ ai-employee-fte/
 │   ├── email_reasoner/     # Email classification
 │   ├── hitl_approval/      # Human-in-the-loop system
 │   ├── linkedin_publisher/ # LinkedIn automation
-│   └── facebook_publisher/ # Facebook automation
+│   ├── facebook_publisher/ # Facebook automation
+│   └── resilience/         # Shared resilience layer (retry, circuit, health, CLIs)
 ├── tests/                  # Test suite
+├── docs/                   # Operator guides (demo script, troubleshooting)
 ├── specs/                  # Feature specifications
 ├── .specify/               # SpecifyPlus framework
 ├── pyproject.toml          # Python project config
@@ -282,6 +310,13 @@ MIT License - See [LICENSE](LICENSE) for details.
 2. Create a feature branch
 3. Follow the spec-driven workflow (see `.specify/memory/constitution.md`)
 4. Submit a pull request
+
+## Documentation
+
+- **[Quickstart (Resilience)](specs/015-error-recovery-resilience/quickstart.md)** — operator guide for `sentinel-status`, `sentinel-recover`, health files, exit codes, PM2/systemd integration.
+- **[Demo Script](docs/demo-script.md)** — 10-minute end-to-end walkthrough: capture → triage → failure cascade → recovery.
+- **[Troubleshooting](docs/troubleshooting.md)** — symptom-to-fix field guide for Gmail auth, WhatsApp sessions, circuit breaker stuck open, failed queue handling, missing subsystems.
+- **[Gmail API Setup](docs/gmail-api-setup.md)** — step-by-step OAuth setup.
 
 ## Acknowledgments
 

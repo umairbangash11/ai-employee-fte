@@ -1,10 +1,33 @@
-"""Exceptions for LinkedIn publisher."""
+"""Exceptions for LinkedIn publisher.
+
+Feature 015 / T101: the base class now inherits from `resilience.ResilienceError`
+so the shared hierarchy (category, retryable, error_code, context) is
+available on every LinkedIn publisher exception. The forgiving `__init__`
+keeps existing `raise LinkedInPublishError("msg")` call sites working.
+"""
+
+from resilience import ResilienceError
+from resilience.exceptions import FailureCategory
 
 
-class LinkedInPublishError(Exception):
-    """Base exception for LinkedIn publisher."""
+class LinkedInPublishError(ResilienceError):
+    """Base exception for LinkedIn publisher (now a ResilienceError)."""
 
-    pass
+    def __init__(
+        self,
+        message: str = "",
+        error_code: str = "ERR_LINKEDIN_PUBLISH",
+        category: FailureCategory = FailureCategory.INTERNAL_ERROR,
+        retryable: bool = False,
+        **kwargs,
+    ):
+        super().__init__(
+            error_code=error_code,
+            category=category,
+            message=message,
+            retryable=retryable,
+            **kwargs,
+        )
 
 
 class InvalidFrontmatterError(LinkedInPublishError):

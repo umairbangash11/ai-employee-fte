@@ -1,8 +1,19 @@
 """CLI entry point for Inbox → Needs_Action Router."""
 
+import sys
+from pathlib import Path
+
 import click
 
+from resilience import ExitCode, HealthManager, ResilienceError
 from router import route_inbox
+
+SUBSYSTEM_NAME = "router"
+
+
+def _router_health_manager(health_file: Path) -> HealthManager:
+    """Factory for the router subsystem's HealthManager (T079)."""
+    return HealthManager(subsystem=SUBSYSTEM_NAME, state_dir=health_file.parent)
 
 
 @click.command()
@@ -23,13 +34,39 @@ from router import route_inbox
     is_flag=True,
     help="Show detailed output",
 )
-def main(vault: str, dry_run: bool, verbose: bool):
+@click.option(
+    "--health-file",
+    type=click.Path(),
+    default="./.watcher-state/router_health.json",
+    help="Path to health status JSON (read by sentinel-status, T081)",
+)
+@click.option(
+    "--log-dir",
+    type=click.Path(),
+    default="./vault/Logs",
+    help="Directory for structured failure logs (FR-005)",
+)
+def main(vault: str, dry_run: bool, verbose: bool, health_file: str, log_dir: str):
     """Route emails from Inbox to Needs_Action based on routing rules.
 
     Scans /Inbox/email/ for markdown files and routes matching files
     to /Needs_Action/email/ based on urgency flags, keywords, and SLA breach.
     """
-    report = route_inbox(vault, dry_run=dry_run)
+    # T079 + T081: Initialize HealthManager, record each router invocation.
+    health = _router_health_manager(Path(health_file))
+
+    try:
+        report = route_inbox(vault, dry_run=dry_run)
+    except ResilienceError as exc:
+        health.record_failure(exc.message)
+        health.heartbeat()
+        click.echo(f"Router failed: {exc.message}", err=True)
+        sys.exit(ExitCode.RECOVERABLE.value if exc.retryable else ExitCode.FATAL.value)
+    except Exception as exc:
+        health.record_failure(str(exc))
+        health.heartbeat()
+        click.echo(f"Router failed: {exc}", err=True)
+        sys.exit(ExitCode.FATAL.value)
 
     if dry_run:
         click.echo("DRY RUN - No files were moved")
@@ -53,6 +90,18 @@ def main(vault: str, dry_run: bool, verbose: bool):
         click.echo("Errors:")
         for err in report.errors:
             click.echo(f"  {err.path.name}: {err.error_type} - {err.message}")
+
+    # T081: health accounting + heartbeat.
+    if report.error_count == 0:
+        health.record_success()
+    else:
+        health.record_failure(f"{report.error_count} file(s) failed during routing")
+    health.heartbeat()
+
+    # T082: standard exit codes.
+    if report.error_count > 0:
+        sys.exit(ExitCode.RECOVERABLE.value)
+    sys.exit(ExitCode.SUCCESS.value)
 
 
 if __name__ == "__main__":

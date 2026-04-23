@@ -7,10 +7,11 @@ from pathlib import Path
 
 import click
 
-from . import __version__
+from . import __version__, create_hitl_health_manager
 from .config import HITLConfig
 from .validator import parse_approval_file, get_approval_summary, validate_frontmatter
 from .utils import ensure_approval_dirs
+from resilience import ExitCode
 
 
 @click.group()
@@ -53,7 +54,7 @@ def _get_vault_path(ctx) -> Path:
         return Path(env_path)
 
     click.echo("Error: VAULT_PATH not set. Use --vault-path or set VAULT_PATH environment variable.", err=True)
-    sys.exit(1)
+    sys.exit(ExitCode.FATAL.value)
 
 
 def _get_pending_files(vault_path: Path) -> list[Path]:
@@ -141,20 +142,20 @@ def show(ctx, approval_id):
 
     if not matches:
         click.echo(f"No approval found matching: {approval_id}", err=True)
-        sys.exit(1)
+        sys.exit(ExitCode.FATAL.value)
 
     if len(matches) > 1:
         click.echo(f"Multiple matches found for '{approval_id}':")
         for m in matches:
             click.echo(f"  {m.name}")
-        sys.exit(1)
+        sys.exit(ExitCode.FATAL.value)
 
     file_path = matches[0]
     parsed = parse_approval_file(file_path)
 
     if not parsed:
         click.echo(f"Failed to parse: {file_path}", err=True)
-        sys.exit(1)
+        sys.exit(ExitCode.FATAL.value)
 
     # Determine status from location
     if "Pending_Approval" in str(file_path):

@@ -50,6 +50,55 @@ from sentinel.logger import write_log_entry
 from sentinel.mover import deduplicate_filename
 from sentinel.planner import write_execution_plan
 
+# Feature 015 — resilience integration (T083, T085, T086, T088, T089).
+from resilience import (
+    CircuitBreaker,
+    CircuitOpenError,
+    ExitCode,
+    HealthManager,
+    ResilienceError,
+    ralph_wiggum_loop,
+    route_to_failed_queue,
+)
+from resilience.exceptions import DataMalformedError, InternalError, TransientNetworkError
+
+ORCHESTRATOR_SUBSYSTEM = "orchestrator"
+OPENAI_CIRCUIT_NAME = "openai_api"
+DEFAULT_STATE_DIR = Path(".watcher-state")
+
+
+def create_orchestrator_health_manager(
+    state_dir: Path = DEFAULT_STATE_DIR,
+) -> HealthManager:
+    """Factory for the orchestrator's HealthManager (T085)."""
+    return HealthManager(subsystem=ORCHESTRATOR_SUBSYSTEM, state_dir=state_dir)
+
+
+def create_openai_circuit_breaker(name: str = OPENAI_CIRCUIT_NAME) -> CircuitBreaker:
+    """Factory for the OpenAI API CircuitBreaker (T086)."""
+    return CircuitBreaker(name=name)
+
+
+def _translate_orchestrator_error(error: Exception) -> ResilienceError:
+    """Map brain.py exceptions to the resilience hierarchy."""
+    if isinstance(error, ResilienceError):
+        return error
+    error_name = type(error).__name__
+    if error_name in ("APIError", "APIConnectionError", "APITimeoutError", "RateLimitError"):
+        return TransientNetworkError(
+            f"OpenAI API error: {error}",
+            context={"original_error": str(error), "error_type": error_name},
+        )
+    if isinstance(error, (ValueError, KeyError)):
+        return DataMalformedError(
+            f"Malformed classification response: {error}",
+            context={"original_error": str(error)},
+        )
+    return InternalError(
+        f"Unexpected orchestrator error: {error}",
+        context={"original_error": str(error), "error_type": error_name},
+    )
+
 
 ASSISTANT_SYSTEM_PROMPT = """\
 You are the Assistant persona for a Digital FTE (Full-Time Employee) system.
@@ -226,6 +275,8 @@ class InboxTriageHandler(FileSystemEventHandler):
         vault_path: Path,
         client: OpenAI,
         model: str,
+        health: HealthManager = None,
+        circuit: CircuitBreaker = None,
     ):
         super().__init__()
         self.vault_path = Path(vault_path).resolve()
@@ -236,6 +287,9 @@ class InboxTriageHandler(FileSystemEventHandler):
         self.logs_dir = self.vault_path / "Logs"
         self.client = client
         self.model = model
+        # T085/T086 — resilience context constructed at startup, persisted across events.
+        self.health = health or create_orchestrator_health_manager()
+        self.circuit = circuit or create_openai_circuit_breaker()
 
     def on_created(self, event):
         if event.is_directory:
@@ -257,88 +311,119 @@ class InboxTriageHandler(FileSystemEventHandler):
         self._process_email(filepath)
 
     def _process_email(self, filepath: Path) -> None:
-        """Triage a single email file with Ralph Wiggum retry."""
+        """Triage a single email file using the shared Ralph Wiggum Loop (T084)."""
         filename = filepath.name
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         print(f"[{now_str}] Processing: {filename}")
 
-        last_error = None
-        for attempt in range(1, 4):
+        try:
+            content = filepath.read_text(encoding="utf-8")
+            email_meta = parse_email_frontmatter(content)
+        except Exception as e:
+            # Non-retryable read/parse failure — log and skip.
+            translated = _translate_orchestrator_error(e)
+            self.health.record_failure(translated.message)
+            self.health.heartbeat()
+            write_log_entry(
+                logs_dir=self.logs_dir, action_type="error",
+                source_path=filepath, dest_path=self.drafts_dir,
+                file_size=(filepath.stat().st_size if filepath.exists() else 0),
+                outcome="failure",
+                details=f"Pre-classification read failed: {translated.message}",
+            )
+            print(f"  Error: {translated.message}")
+            return
+
+        def primary():
+            # Re-read inside the operation so attempt 2 picks up any
+            # mid-flight edits (matches the legacy attempt-2 semantics).
+            fresh_content = filepath.read_text(encoding="utf-8")
+            return self.circuit.execute(
+                lambda: classify_email(self.client, self.model, fresh_content)
+            )
+
+        def simplified_fallback():
+            # Attempt 3: skip OpenAI entirely, route for human review (legacy semantics).
+            return {
+                "needs_reply": True,
+                "reason": (
+                    "Fallback: classification failed after retries, "
+                    "routing for human review."
+                ),
+                "draft": None,
+            }
+
+        try:
+            classification = ralph_wiggum_loop(
+                operation=primary,
+                simplify_fn=simplified_fallback,
+            )
+        except CircuitOpenError as exc:
+            # Circuit is open — fast-fail and route the email so a human can
+            # retry once OpenAI recovers (T088).
+            self.health.record_failure(exc.message)
+            self.health.set_circuit_state(self.circuit.state)
+            self.health.heartbeat()
             try:
-                content = filepath.read_text(encoding="utf-8")
-                email_meta = parse_email_frontmatter(content)
-
-                if attempt == 1:
-                    # Attempt 1: classify as planned
-                    classification = classify_email(
-                        self.client, self.model, content
-                    )
-                elif attempt == 2:
-                    # Attempt 2: re-read content, retry
-                    content = filepath.read_text(encoding="utf-8")
-                    classification = classify_email(
-                        self.client, self.model, content
-                    )
-                else:
-                    # Attempt 3: simplify — assume needs reply
-                    classification = {
-                        "needs_reply": True,
-                        "reason": "Fallback: classification failed, "
-                        "routing for human review.",
-                        "draft": None,
-                    }
-
-                if classification["needs_reply"]:
-                    self._route_reply_needed(
-                        filepath, filename, email_meta, classification
-                    )
-                else:
-                    print(
-                        f"  No reply needed: {classification['reason']}"
-                    )
-                    write_log_entry(
-                        logs_dir=self.logs_dir,
-                        action_type="email_triaged",
-                        source_path=filepath,
-                        dest_path=filepath,
-                        file_size=filepath.stat().st_size,
-                        outcome="success",
-                        details=(
-                            f"No reply needed. "
-                            f"Reason: {classification['reason']}"
+                route_to_failed_queue(
+                    source_item=filepath, subsystem=ORCHESTRATOR_SUBSYSTEM,
+                    failure_reason=exc.message, retry_attempts=3,
+                    recovery_action=(
+                        "OpenAI API circuit is open. Wait for recovery then "
+                        "use `sentinel-recover retry` to re-queue."
+                    ),
+                    vault_path=self.vault_path, error_code=exc.error_code,
+                )
+            except Exception as re:
+                print(f"  Routing to failed queue failed: {re}")
+            print(f"  Error: {exc.message}")
+            return
+        except Exception as e:
+            translated = _translate_orchestrator_error(e)
+            self.health.record_failure(translated.message)
+            self.health.set_circuit_state(self.circuit.state)
+            self.health.heartbeat()
+            write_log_entry(
+                logs_dir=self.logs_dir, action_type="error",
+                source_path=filepath, dest_path=self.drafts_dir,
+                file_size=(filepath.stat().st_size if filepath.exists() else 0),
+                outcome="failure",
+                details=f"Triage failed after 3 attempts: {translated.message}",
+            )
+            # T088: route failed emails to Needs_Action/email/failed/ for recovery.
+            try:
+                if filepath.exists():
+                    route_to_failed_queue(
+                        source_item=filepath, subsystem=ORCHESTRATOR_SUBSYSTEM,
+                        failure_reason=translated.message, retry_attempts=3,
+                        recovery_action=(
+                            "Inspect email, fix classification issue or retry "
+                            "with `sentinel-recover retry`."
                         ),
+                        vault_path=self.vault_path, error_code=translated.error_code,
                     )
+            except Exception as re:
+                print(f"  Routing to failed queue failed: {re}")
+            print(f"  Error: Triage failed after 3 attempts. See Logs/.")
+            return
 
-                return
+        # Classification succeeded (possibly via fallback).
+        self.health.record_success()
+        self.health.set_circuit_state(self.circuit.state)
+        self.health.heartbeat()
 
-            except Exception as e:
-                last_error = e
-                if attempt < 3:
-                    print(
-                        f"  Retry {attempt}/3 failed: {e}"
-                    )
-                    time.sleep(1.0 * attempt)
-                    continue
-
-                # All attempts exhausted
-                write_log_entry(
-                    logs_dir=self.logs_dir,
-                    action_type="error",
-                    source_path=filepath,
-                    dest_path=self.drafts_dir,
-                    file_size=(
-                        filepath.stat().st_size if filepath.exists() else 0
-                    ),
-                    outcome="failure",
-                    details=(
-                        f"Triage failed after 3 attempts: {last_error}"
-                    ),
-                )
-                print(
-                    f"  Error: Triage failed after 3 attempts. "
-                    f"See Logs/."
-                )
+        if classification["needs_reply"]:
+            self._route_reply_needed(filepath, filename, email_meta, classification)
+        else:
+            print(f"  No reply needed: {classification['reason']}")
+            write_log_entry(
+                logs_dir=self.logs_dir, action_type="email_triaged",
+                source_path=filepath, dest_path=filepath,
+                file_size=filepath.stat().st_size, outcome="success",
+                details=f"No reply needed. Reason: {classification['reason']}",
+            )
+        return
 
     def _route_reply_needed(
         self,
@@ -466,7 +551,7 @@ def start_brain(
                 )
                 observer.stop()
                 observer.join()
-                raise SystemExit(2)
+                raise SystemExit(ExitCode.CONFIGURATION.value)
             time.sleep(poll_interval)
     except KeyboardInterrupt:
         observer.stop()
@@ -492,7 +577,7 @@ def main():
             "Error: OPENAI_API_KEY not set in .env",
             file=sys.stderr,
         )
-        raise SystemExit(1)
+        raise SystemExit(ExitCode.CONFIGURATION.value)
 
     start_brain(
         vault_path=config["vault_path"],

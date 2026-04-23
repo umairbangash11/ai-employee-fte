@@ -3,12 +3,8 @@
 import argparse
 import signal
 import sys
-import time
 from datetime import datetime
 from pathlib import Path
-
-from google.auth.exceptions import RefreshError
-from googleapiclient.errors import HttpError
 
 
 # Global flag for graceful shutdown
@@ -18,12 +14,23 @@ from gmail_watcher import __version__
 from gmail_watcher.auth import get_credentials, save_token
 from gmail_watcher.config import SentinelConfig
 from gmail_watcher.state import load_state, save_state, is_captured, mark_captured
-from gmail_watcher.watcher import build_service, fetch_unread_messages, parse_message
+from gmail_watcher.watcher import (
+    build_service,
+    create_gmail_circuit_breaker,
+    create_health_manager,
+    parse_message,
+    poll_with_retry as _watcher_poll_with_retry,
+    route_email_to_failed,
+    translate_gmail_error,
+)
 from gmail_watcher.writer import write_email_file
-
-
-# Transient errors that can be retried
-TRANSIENT_ERRORS = (TimeoutError, ConnectionError, HttpError)
+from resilience import (
+    CircuitBreaker,
+    ExitCode,
+    FailureCategory,
+    HealthManager,
+    ResilienceError,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -91,6 +98,21 @@ def parse_args() -> argparse.Namespace:
         help="Preview mode: show what would be captured without writing files",
     )
 
+    # Resilience integration (Feature 015, T067)
+    parser.add_argument(
+        "--health-file",
+        type=Path,
+        default=Path("./.watcher-state/gmail_watcher_health.json"),
+        help="Path to health status JSON (read by sentinel-status)",
+    )
+
+    parser.add_argument(
+        "--log-dir",
+        type=Path,
+        default=Path("./vault/Logs"),
+        help="Directory for structured failure logs (FR-005)",
+    )
+
     return parser.parse_args()
 
 
@@ -112,145 +134,166 @@ def build_config(args: argparse.Namespace) -> SentinelConfig:
     return config
 
 
-def is_transient_error(error: Exception) -> bool:
-    """Check if an error is transient and can be retried.
+def _exit_code_for(error: ResilienceError) -> int:
+    """Map a ResilienceError's category to an ExitCode integer (T066/T068).
 
     Args:
-        error: Exception to check
+        error: Translated resilience error.
 
     Returns:
-        True if the error is transient
+        Int exit code: CONFIGURATION for credentials/missing-resource,
+        RECOVERABLE for transient/rate-limit/service-down, FATAL otherwise.
     """
-    if isinstance(error, HttpError):
-        # Rate limit (429) or server errors (5xx) are transient
-        status = error.resp.status
-        return status == 429 or status >= 500
-    return isinstance(error, TRANSIENT_ERRORS)
+    if error.category in (
+        FailureCategory.CREDENTIALS_INVALID,
+        FailureCategory.RESOURCE_UNAVAILABLE,
+    ):
+        return ExitCode.CONFIGURATION.value
+    if error.category in (
+        FailureCategory.TRANSIENT_NETWORK,
+        FailureCategory.RATE_LIMITED,
+        FailureCategory.EXTERNAL_SERVICE_DOWN,
+        FailureCategory.SESSION_EXPIRED,
+    ):
+        return ExitCode.RECOVERABLE.value
+    return ExitCode.FATAL.value
 
 
-def get_actionable_message(error: Exception) -> str:
-    """Get actionable error message for common failures.
+def _build_health_and_circuit(
+    config: SentinelConfig,
+    args: argparse.Namespace,
+) -> tuple[HealthManager, CircuitBreaker]:
+    """Construct the HealthManager and CircuitBreaker for this process (T066).
+
+    The health file path honours --health-file (default
+    `./.watcher-state/gmail_watcher_health.json`). The breaker uses
+    resilience defaults per spec FR-009 and persists across poll cycles
+    within this process so its rolling failure window spans real time.
 
     Args:
-        error: Exception to describe
+        config: Built SentinelConfig (already reconciled with args).
+        args: Parsed argparse namespace.
 
     Returns:
-        Human-readable actionable message
+        Tuple of (HealthManager, CircuitBreaker).
     """
-    if isinstance(error, RefreshError):
-        return "Authentication token refresh failed. Run 'gmail-watcher --auth' to re-authenticate."
-    if isinstance(error, FileNotFoundError):
-        if "credentials.json" in str(error):
-            return "OAuth credentials not found. Download credentials.json from Google Cloud Console."
-        if "token.json" in str(error):
-            return "Not authenticated. Run 'gmail-watcher --auth' first."
-    if isinstance(error, HttpError):
-        status = error.resp.status
-        if status == 401:
-            return "Authentication expired. Run 'gmail-watcher --auth' to re-authenticate."
-        if status == 403:
-            return "Permission denied. Check Gmail API is enabled and scopes are correct."
-        if status == 429:
-            return "Rate limited. Wait a few minutes before retrying."
-    if isinstance(error, (TimeoutError, ConnectionError)):
-        return "Network error. Check your internet connection."
-    return str(error)
+    health_path: Path = args.health_file
+    health = create_health_manager(state_dir=health_path.parent)
+    # The factory uses the default filename; if the caller supplied a custom
+    # --health-file basename, override the health manager's health_file
+    # accessor by pointing state_dir at its parent (already done above).
+    circuit = create_gmail_circuit_breaker()
+    health.set_circuit_state(circuit.state)
+    return health, circuit
 
 
-def poll_with_retry(config: SentinelConfig, max_retries: int = 3) -> int:
-    """Run poll cycle with retry on transient errors.
+def _do_poll(
+    config: SentinelConfig,
+    health: HealthManager,
+    circuit: CircuitBreaker,
+) -> int:
+    """Run one resilience-integrated Gmail poll cycle (T066 pipeline swap).
 
-    Implements Ralph Wiggum Loop: 3 retries with exponential backoff.
-
-    Args:
-        config: Sentinel configuration
-        max_retries: Maximum number of retry attempts
-
-    Returns:
-        Exit code (0 for success)
+    Uses `watcher.poll_with_retry` for the fetch step (ralph_wiggum_loop +
+    circuit breaker + translated error hierarchy). Per-message processing
+    failures route each offending email to `Needs_Action/email/failed/`
+    via `route_email_to_failed`. Returns a standardized ExitCode integer.
     """
-    for attempt in range(max_retries):
-        try:
-            return _do_poll(config)
-        except TRANSIENT_ERRORS as e:
-            if not is_transient_error(e):
-                raise
+    # Authentication (outside retry — non-retryable per FR-002).
+    try:
+        creds = get_credentials(config.credentials_path, config.token_path)
+        save_token(creds, config.token_path)
+    except Exception as exc:
+        translated = translate_gmail_error(exc)
+        print(f"Error: {translated.message}", file=sys.stderr)
+        health.record_failure(translated.message)
+        health.heartbeat()
+        return _exit_code_for(translated)
 
-            if attempt < max_retries - 1:
-                backoff = (2 ** attempt) * 10  # 10s, 20s, 40s
-                print(f"Attempt {attempt + 1} failed: {e}")
-                print(f"Retrying in {backoff} seconds...")
-                time.sleep(backoff)
-            else:
-                print(f"Failed after {max_retries} attempts: {e}", file=sys.stderr)
-                print(get_actionable_message(e), file=sys.stderr)
-                return 1
-
-    return 1  # Should not reach here
-
-
-def _do_poll(config: SentinelConfig) -> int:
-    """Internal poll implementation.
-
-    Args:
-        config: Sentinel configuration
-
-    Returns:
-        Exit code (0 for success)
-    """
-    # Get credentials
-    creds = get_credentials(config.credentials_path, config.token_path)
-
-    # Save token if it was refreshed
-    save_token(creds, config.token_path)
-
-    # Load deduplication state
+    # Load deduplication state (outside retry — disk errors are config/fatal).
     state = load_state(config.state_path)
-
-    # Build service
     service = build_service(creds)
 
-    # Fetch unread messages
+    # Poll with resilience (retry + circuit + health updates already inside).
     print(f"Polling Gmail for unread messages...")
-    raw_messages = fetch_unread_messages(service, max_results=config.max_initial_fetch)
+    try:
+        raw_messages = _watcher_poll_with_retry(
+            service,
+            health,
+            max_results=config.max_initial_fetch,
+            circuit=circuit,
+        )
+    except ResilienceError as exc:
+        print(f"Poll failed: {exc.message}", file=sys.stderr)
+        # `poll_with_retry` already called health.record_failure per attempt;
+        # keep the breaker reflection on the health file current.
+        health.set_circuit_state(circuit.state)
+        health.heartbeat()
+        return _exit_code_for(exc)
+    except Exception as exc:
+        translated = translate_gmail_error(exc)
+        print(f"Poll failed: {translated.message}", file=sys.stderr)
+        health.set_circuit_state(circuit.state)
+        health.heartbeat()
+        return _exit_code_for(translated)
 
     if not raw_messages:
         print("No unread messages found.")
-        return 0
+        health.set_circuit_state(circuit.state)
+        return ExitCode.SUCCESS.value
 
     print(f"Found {len(raw_messages)} unread message(s)")
 
-    # Process each message
+    # Per-message processing — each failure routes to Needs_Action/email/failed/.
     captured = 0
     skipped = 0
+    per_message_failures = 0
     for raw in raw_messages:
-        message = parse_message(raw)
+        filepath: Path | None = None
+        try:
+            message = parse_message(raw)
 
-        # Skip already captured messages
-        if is_captured(state, message.message_id):
-            skipped += 1
-            continue
+            if is_captured(state, message.message_id):
+                skipped += 1
+                continue
 
-        # Write to vault (or preview if dry-run)
-        filepath = write_email_file(message, config.vault_path, dry_run=config.dry_run)
+            filepath = write_email_file(message, config.vault_path, dry_run=config.dry_run)
 
-        if filepath:
-            print(f"Captured: {message.subject}")
-            print(f"  → {filepath}")
-            captured += 1
+            if filepath:
+                print(f"Captured: {message.subject}")
+                print(f"  → {filepath}")
+                captured += 1
+                if not config.dry_run:
+                    mark_captured(state, message.message_id)
+            elif config.dry_run:
+                captured += 1
+        except Exception as exc:
+            per_message_failures += 1
+            translated = (
+                exc if isinstance(exc, ResilienceError) else translate_gmail_error(exc)
+            )
+            print(
+                f"Message processing failed: {translated.message}",
+                file=sys.stderr,
+            )
+            if filepath is not None and filepath.exists() and not config.dry_run:
+                try:
+                    routed = route_email_to_failed(
+                        source_item=filepath,
+                        vault_path=config.vault_path,
+                        failure_reason=translated.message,
+                        error_code=translated.error_code,
+                    )
+                    print(f"  Routed to failed queue: {routed}", file=sys.stderr)
+                except Exception as route_exc:
+                    print(
+                        f"  Routing to failed queue also failed: {route_exc}",
+                        file=sys.stderr,
+                    )
 
-            # Mark as captured (unless dry-run)
-            if not config.dry_run:
-                mark_captured(state, message.message_id)
-        elif config.dry_run:
-            # dry_run returns None but still counts as "would capture"
-            captured += 1
-
-    # Save state (unless dry-run)
     if not config.dry_run:
         save_state(state, config.state_path)
 
-    # Report results
     if skipped > 0:
         print(f"Skipped {skipped} already captured message(s)")
 
@@ -259,19 +302,24 @@ def _do_poll(config: SentinelConfig) -> int:
     else:
         print(f"\nCaptured {captured} message(s) to vault.")
 
-    return 0
+    health.set_circuit_state(circuit.state)
+
+    if per_message_failures > 0:
+        return ExitCode.RECOVERABLE.value
+    return ExitCode.SUCCESS.value
 
 
-def run_once(config: SentinelConfig) -> int:
-    """Run a single poll cycle with retry.
+def run_once(
+    config: SentinelConfig,
+    health: HealthManager,
+    circuit: CircuitBreaker,
+) -> int:
+    """Run a single resilience-integrated poll cycle.
 
-    Args:
-        config: Sentinel configuration
-
-    Returns:
-        Exit code (0 for success)
+    Retry is now inside `_watcher_poll_with_retry` (ralph_wiggum_loop), so
+    `run_once` performs exactly one pass through `_do_poll`.
     """
-    return poll_with_retry(config)
+    return _do_poll(config, health, circuit)
 
 
 def _handle_shutdown(signum, frame):
@@ -281,18 +329,16 @@ def _handle_shutdown(signum, frame):
     print("\nShutdown requested, finishing current poll...")
 
 
-def run_poll_loop(config: SentinelConfig) -> int:
-    """Run continuous polling loop.
+def run_poll_loop(
+    config: SentinelConfig,
+    health: HealthManager,
+    circuit: CircuitBreaker,
+) -> int:
+    """Run continuous polling loop with resilience integration (T066)."""
+    import time as _time  # local alias — the legacy top-level import was removed
 
-    Args:
-        config: Sentinel configuration
-
-    Returns:
-        Exit code (0 for success)
-    """
     global _shutdown_requested
 
-    # Register signal handler for graceful shutdown
     signal.signal(signal.SIGINT, _handle_shutdown)
     signal.signal(signal.SIGTERM, _handle_shutdown)
 
@@ -307,23 +353,24 @@ def run_poll_loop(config: SentinelConfig) -> int:
         print(f"[{timestamp}] Poll #{poll_count}")
 
         try:
-            poll_with_retry(config)
-        except Exception as e:
-            print(f"Poll failed: {e}", file=sys.stderr)
-            print(get_actionable_message(e), file=sys.stderr)
+            _do_poll(config, health, circuit)
+        except ResilienceError as exc:
+            print(f"Poll failed: {exc.message}", file=sys.stderr)
+        except Exception as exc:
+            translated = translate_gmail_error(exc)
+            print(f"Poll failed: {translated.message}", file=sys.stderr)
 
         if _shutdown_requested:
             break
 
-        # Wait for next poll interval
         print(f"Next poll in {config.poll_interval} seconds...")
         for _ in range(config.poll_interval):
             if _shutdown_requested:
                 break
-            time.sleep(1)
+            _time.sleep(1)
 
     print("\nGmail watcher stopped.")
-    return 0
+    return ExitCode.SUCCESS.value
 
 
 def main() -> int:
@@ -342,13 +389,13 @@ def main() -> int:
             )
             print(f"Authentication successful!")
             print(f"Token saved to: {config.token_path}")
-            return 0
+            return ExitCode.SUCCESS.value
         except FileNotFoundError as e:
             print(f"Error: {e}", file=sys.stderr)
-            return 1
+            return ExitCode.CONFIGURATION.value
         except Exception as e:
             print(f"Authentication failed: {e}", file=sys.stderr)
-            return 1
+            return ExitCode.FATAL.value
 
     # Validate interval
     if config.poll_interval < 60:
@@ -356,20 +403,28 @@ def main() -> int:
         print("Using minimum interval of 60 seconds.", file=sys.stderr)
         config.poll_interval = 60
 
+    # Build resilience context (HealthManager + CircuitBreaker) — T066.
+    health, circuit = _build_health_and_circuit(config, args)
+
     # Run watcher
     try:
         if config.once:
-            return run_once(config)
+            return run_once(config, health, circuit)
 
-        return run_poll_loop(config)
+        return run_poll_loop(config, health, circuit)
 
     except FileNotFoundError as e:
-        print(f"Error: {e}", file=sys.stderr)
+        translated = translate_gmail_error(e)
+        print(f"Error: {translated.message}", file=sys.stderr)
         print("\nRun 'gmail-watcher --auth' to authenticate first.", file=sys.stderr)
-        return 1
+        return ExitCode.CONFIGURATION.value
+    except ResilienceError as e:
+        print(f"Error: {e.message}", file=sys.stderr)
+        return _exit_code_for(e)
     except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return 1
+        translated = translate_gmail_error(e)
+        print(f"Error: {translated.message}", file=sys.stderr)
+        return _exit_code_for(translated)
 
 
 if __name__ == "__main__":

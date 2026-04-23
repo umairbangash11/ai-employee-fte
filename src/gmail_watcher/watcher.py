@@ -3,11 +3,293 @@
 import base64
 from datetime import datetime
 from email.utils import parsedate_to_datetime
+from pathlib import Path
+from typing import Optional
 
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build, Resource
 
+from resilience import (
+    CircuitBreaker,
+    CircuitOpenError,
+    HealthManager,
+    ResilienceError,
+    RetryPolicy,
+    ralph_wiggum_loop,
+    route_to_failed_queue,
+)
+from resilience.exceptions import (
+    CredentialsInvalidError,
+    DataMalformedError,
+    ExternalServiceDownError,
+    InternalError,
+    RateLimitedError,
+    TransientNetworkError,
+)
+
+from gmail_watcher import __version__ as GMAIL_WATCHER_VERSION
 from gmail_watcher.models import Attachment, EmailMessage
+
+SUBSYSTEM_NAME = "gmail_watcher"
+GMAIL_API_CIRCUIT_NAME = "gmail_api"
+DEFAULT_STATE_DIR = Path(".watcher-state")
+
+
+def create_health_manager(state_dir: Path = DEFAULT_STATE_DIR) -> HealthManager:
+    """Construct the HealthManager for the gmail_watcher subsystem.
+
+    Args:
+        state_dir: Directory where the health file is persisted.
+
+    Returns:
+        HealthManager bound to `.watcher-state/gmail_watcher_health.json`.
+    """
+    return HealthManager(
+        subsystem=SUBSYSTEM_NAME,
+        state_dir=state_dir,
+        version=GMAIL_WATCHER_VERSION,
+    )
+
+
+def create_gmail_circuit_breaker(
+    name: str = GMAIL_API_CIRCUIT_NAME,
+) -> CircuitBreaker:
+    """Construct the CircuitBreaker that protects Gmail API calls.
+
+    Uses `CircuitBreaker`'s defaults (failure_threshold=5,
+    failure_rate_threshold=0.5, failure_window_seconds=60,
+    recovery_timeout_seconds=30, success_threshold=3) per tasks.md T035 and
+    spec FR-009. Integration into `poll_with_retry` is deferred to a
+    subsequent step.
+
+    Args:
+        name: Circuit identifier.
+
+    Returns:
+        CircuitBreaker in CLOSED state.
+    """
+    return CircuitBreaker(name=name)
+
+
+def poll_once(
+    service: Resource,
+    health: HealthManager,
+    max_results: int = 50,
+) -> list[dict]:
+    """Execute one Gmail poll cycle, recording health and emitting a heartbeat.
+
+    On success, returns the fetched messages and calls `health.record_success()`.
+    On any exception from `fetch_unread_messages`, calls
+    `health.record_failure(reason)` and re-raises so the caller can decide
+    retry strategy (T061). `health.heartbeat()` always fires in the `finally`
+    block so the watchdog observes liveness on every poll — success or failure.
+
+    Args:
+        service: Gmail API service.
+        health: HealthManager for the gmail_watcher subsystem.
+        max_results: Maximum number of unread messages to fetch.
+
+    Returns:
+        List of full message objects from the Gmail API (may be empty).
+    """
+    try:
+        messages = fetch_unread_messages(service, max_results=max_results)
+        health.record_success()
+        return messages
+    except Exception as exc:
+        health.record_failure(str(exc) or exc.__class__.__name__)
+        raise
+    finally:
+        health.heartbeat()
+
+
+def poll_with_retry(
+    service: Resource,
+    health: HealthManager,
+    max_results: int = 50,
+    policy: Optional[RetryPolicy] = None,
+    circuit: Optional[CircuitBreaker] = None,
+) -> list[dict]:
+    """Execute a Gmail poll under the Ralph Wiggum Loop (Constitution V).
+
+    Wraps `poll_once` in `ralph_wiggum_loop` so transient failures retry with
+    exponential backoff + jitter. `poll_once` remains the primitive — it still
+    records success/failure and emits a heartbeat on every attempt, so the
+    health file reflects each retry, not just the final outcome.
+
+    When `circuit` is provided, `poll_once` runs under `circuit.execute()` so
+    the breaker observes each attempt's success or failure and can trip OPEN
+    when Gmail is sustainedly failing. A `CircuitOpenError` is forced to
+    non-retryable locally before re-raising so `ralph_wiggum_loop` fast-fails
+    instead of burning the retry budget against a circuit that is already
+    short-circuiting calls.
+
+    Args:
+        service: Gmail API service.
+        health: HealthManager for the gmail_watcher subsystem.
+        max_results: Maximum unread messages to fetch per attempt.
+        policy: Optional RetryPolicy override. Defaults to 3 attempts with
+            exponential backoff.
+        circuit: Optional CircuitBreaker guarding Gmail API calls. When
+            omitted, `poll_once` runs unguarded exactly as before.
+
+    Returns:
+        List of full message objects from the first successful attempt.
+
+    Raises:
+        CircuitOpenError: If `circuit` is provided and its state is OPEN at
+            the time of an attempt. Re-raised with `retryable=False` so the
+            retry loop halts immediately rather than sleeping and re-trying
+            under the same open circuit.
+        Exception: The last exception raised by `poll_once` if all attempts
+            fail or if a non-retryable exception is raised on an earlier
+            attempt.
+    """
+    def _attempt() -> list[dict]:
+        try:
+            if circuit is None:
+                return poll_once(service, health, max_results=max_results)
+            try:
+                return circuit.execute(
+                    lambda: poll_once(service, health, max_results=max_results)
+                )
+            except CircuitOpenError as exc:
+                # Module-wide CircuitOpenError.retryable is True so that
+                # callers who schedule their own retries (e.g. a queue
+                # scheduler with backoff aware of `remaining_seconds`) can
+                # still do so. Inside `poll_with_retry`, however, retrying
+                # immediately under an open circuit would waste the retry
+                # budget — every attempt would fast-fail from the breaker
+                # without ever reaching Gmail. Flip the flag so
+                # `ralph_wiggum_loop`'s `is_retryable(e)` check fast-fails
+                # on this attempt.
+                exc.retryable = False
+                raise
+        except ResilienceError:
+            # Already translated — pass through so ralph_wiggum_loop
+            # consults its own `retryable` flag.
+            raise
+        except Exception as exc:
+            # T066: translate raw Google / network errors at the Gmail API
+            # boundary so `ralph_wiggum_loop.is_retryable(e)` resolves
+            # against the resilience hierarchy (HttpError 429 -> retryable,
+            # RefreshError -> non-retryable, etc.) rather than defaulting
+            # non-ResilienceError exceptions to non-retryable.
+            raise translate_gmail_error(exc) from exc
+
+    return ralph_wiggum_loop(operation=_attempt, policy=policy)
+
+
+def route_email_to_failed(
+    source_item: Path,
+    vault_path: Path,
+    failure_reason: str,
+    retry_attempts: int = 3,
+    error_code: Optional[str] = None,
+) -> Path:
+    """Move a captured email into `Needs_Action/email/failed/` (T065, FR-006).
+
+    Thin adapter over `resilience.route_to_failed_queue` that fixes
+    `subsystem="gmail_watcher"` and attaches a Gmail-specific recovery hint,
+    so `__main__.py`'s per-message processing loop can route a single failed
+    email in one call.
+
+    Args:
+        source_item: Path to the captured email Markdown file (must exist).
+        vault_path: Vault root (used to resolve the failed-queue directory).
+        failure_reason: Human-readable description of what went wrong.
+        retry_attempts: Retries already exhausted. Default 3 matches the
+            Ralph Wiggum Loop policy from `poll_with_retry`.
+        error_code: Optional ResilienceError.error_code for traceability.
+
+    Returns:
+        Path to the wrapper file in `Needs_Action/email/failed/`.
+    """
+    return route_to_failed_queue(
+        source_item=source_item,
+        subsystem=SUBSYSTEM_NAME,
+        failure_reason=failure_reason,
+        retry_attempts=retry_attempts,
+        recovery_action=(
+            "Inspect wrapped email. If the original content is recoverable, "
+            "use `sentinel-recover retry` to re-queue. Otherwise fix the root "
+            "cause (credentials, parser, write target) and delete this wrapper."
+        ),
+        vault_path=vault_path,
+        error_code=error_code,
+    )
+
+
+def translate_gmail_error(error: Exception) -> ResilienceError:
+    """Translate Google API / network errors into ResilienceError (T066).
+
+    Provides the mapping `__main__.py` needs to migrate its legacy
+    `TRANSIENT_ERRORS`/`is_transient_error`/`get_actionable_message` trio to
+    the shared exception hierarchy without duplicating classification logic
+    across subsystems. Uses duck-typing for HttpError so `googleapiclient`
+    remains a soft dependency of this helper.
+
+    Mapping:
+      * HttpError 401 / RefreshError → CredentialsInvalidError
+      * HttpError 403                → CredentialsInvalidError (scope/denied)
+      * HttpError 429                → RateLimitedError
+      * HttpError 5xx                → ExternalServiceDownError
+      * HttpError 4xx (other)        → DataMalformedError
+      * TimeoutError / ConnectionError → TransientNetworkError
+      * Already a ResilienceError    → returned as-is (idempotent)
+      * Anything else                → InternalError
+
+    Args:
+        error: Exception raised by the Gmail API path.
+
+    Returns:
+        ResilienceError subclass with category, error_code, and retryable
+        flag set so `ralph_wiggum_loop` and `sentinel-status` interpret it
+        consistently.
+    """
+    if isinstance(error, ResilienceError):
+        return error
+
+    error_name = type(error).__name__
+    if error_name == "RefreshError":
+        return CredentialsInvalidError(
+            "Gmail OAuth token refresh failed — run `gmail-watcher --auth`.",
+            context={"original_error": str(error)},
+        )
+
+    if error_name == "HttpError":
+        status = getattr(getattr(error, "resp", None), "status", None)
+        context = {"http_status": status, "original_error": str(error)}
+        if status in (401, 403):
+            return CredentialsInvalidError(
+                f"Gmail API rejected credentials (HTTP {status}).",
+                context=context,
+            )
+        if status == 429:
+            return RateLimitedError(
+                "Gmail API rate limit exceeded (HTTP 429).",
+                context=context,
+            )
+        if status is not None and status >= 500:
+            return ExternalServiceDownError(
+                f"Gmail API unavailable (HTTP {status}).",
+                context=context,
+            )
+        return DataMalformedError(
+            f"Gmail API rejected request (HTTP {status}).",
+            context=context,
+        )
+
+    if isinstance(error, (TimeoutError, ConnectionError)):
+        return TransientNetworkError(
+            f"Network error contacting Gmail: {error}",
+            context={"original_error": str(error)},
+        )
+
+    return InternalError(
+        f"Unexpected error in gmail_watcher: {error}",
+        context={"original_error": str(error), "error_type": error_name},
+    )
 
 
 def build_service(credentials: Credentials) -> Resource:
