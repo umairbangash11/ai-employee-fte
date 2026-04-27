@@ -1,255 +1,349 @@
 # Data Model: Gold Phase 4 — CEO Briefing Generation
 
-**Branch**: `014-ceo-briefing-generation`
-**Date**: 2026-04-17
-**Phase**: Phase 1 output of `/sp.plan`
+**Feature Branch**: `014-ceo-briefing-generation`
+**Date**: 2026-04-18
+**Status**: Complete
 
 ---
 
-## Entities
+## Overview
 
-### 1. BriefingConfig
+This document defines the data structures used by the CEO Briefing Generator. All models
+are Python dataclasses used internally; no database or external persistence is required.
+Data flows from vault files → reader models → aggregated BriefingData → markdown output.
 
-Runtime configuration loaded from `.env` at startup. Immutable after construction.
+---
+
+## Core Entities
+
+### BriefingData
+
+The central aggregation structure passed to the briefing writer.
 
 ```python
 @dataclass
-class BriefingConfig:
-    vault_path: Path                  # from VAULT_PATH
-    openai_api_key: str               # from OPENAI_API_KEY
-    openai_model: str                 # from OPENAI_MODEL (default: gpt-4o)
-    lookback_days: int                # from BRIEFING_LOOKBACK_DAYS (default: 7)
-    bottleneck_days: int              # from BRIEFING_BOTTLENECK_DAYS (default: 7)
-    goals_max_chars: int              # from BRIEFING_GOALS_MAX_CHARS (default: 4000)
-    context_max_tokens: int           # from BRIEFING_CONTEXT_MAX_TOKENS (default: 6000)
-    schedule: str | None              # from BRIEFING_SCHEDULE (default: None → on-demand)
-    briefing_time: str                # from BRIEFING_TIME (default: "08:00")
-    headless: bool                    # from BRIEFING_HEADLESS (unused; for convention)
+class BriefingData:
+    """Aggregated data for CEO Briefing generation."""
 
-    # Derived properties
-    @property def briefings_dir(self) -> Path   # vault_path / "Briefings"
-    @property def signals_dir(self) -> Path     # vault_path / "Signals"
-    @property def logs_dir(self) -> Path        # vault_path / "Logs"
-    @property def done_dir(self) -> Path        # vault_path / "Done"
-    @property def needs_action_dir(self) -> Path  # vault_path / "Needs_Action"
-    @property def pending_approval_dir(self) -> Path  # vault_path / "Pending_Approval"
-    @property def accounting_dir(self) -> Path  # vault_path / "Accounting"
-    @property def goals_file(self) -> Path      # vault_path / "Business_Goals.md"
+    # Metadata
+    generated_at: datetime
+    period_start: date       # 7 days before generated_at
+    period_end: date         # generated_at date
+    briefing_type: str       # "Monday" or "Adhoc"
 
-    @classmethod
-    def from_env(cls) -> "BriefingConfig": ...
+    # Business goals
+    goals: list[BusinessGoal]
+    goal_progress: list[GoalProgress]
+
+    # Completed work
+    completed_items: list[CompletedItem]
+
+    # Accounting
+    accounting_summary: AccountingSummary
+
+    # Issues
+    bottlenecks: list[Bottleneck]
+    upcoming_deadlines: list[UpcomingDeadline]
+
+    # Intelligence
+    suggestions: list[ProactiveSuggestion]
+
+    # Metadata for audit
+    data_gaps: list[str]     # Files that couldn't be read
 ```
 
-**Validation rules**:
-- `vault_path` must be a valid directory path (need not exist yet; `ensure_vault_dirs` creates it).
-- `lookback_days` must be >= 1.
-- `bottleneck_days` must be >= 1.
-- `openai_api_key` is optional — if absent, synthesiser falls back to template mode.
-
 ---
 
-### 2. VaultRecord
+### BusinessGoal
 
-A single file read from a vault source directory. Lightweight — stores only the fields
-needed for briefing synthesis.
+Parsed from `vault/Business_Goals.md`.
 
 ```python
 @dataclass
-class VaultRecord:
+class BusinessGoal:
+    """A business goal extracted from Business_Goals.md."""
+
+    title: str               # e.g., "Increase Revenue"
+    slug: str                # e.g., "increase-revenue"
+    description: str         # Full description text
+    target: str | None       # Optional target metric
+```
+
+**Source**: `## Goal: <title>` headings in `vault/Business_Goals.md`
+
+**Parsing rules**:
+- Regex: `^## Goal:\s*(.+)$`
+- Slug: lowercase, replace non-alphanumeric with hyphen, strip trailing hyphens
+
+---
+
+### GoalProgress
+
+Computed by aligning completed items to business goals.
+
+```python
+@dataclass
+class GoalProgress:
+    """Progress status for a business goal."""
+
+    goal_slug: str
+    goal_title: str
+    status: Literal["on_track", "at_risk", "blocked", "no_activity"]
+    completed_count: int     # Items completed in period
+    pending_count: int       # Items in Needs_Action for this goal
+    reason: str              # Human-readable explanation
+```
+
+**Computation**:
+- `on_track`: completed_count > 0 and pending_count <= 2
+- `at_risk`: completed_count > 0 but pending_count > 2
+- `blocked`: completed_count == 0 and pending_count > 0
+- `no_activity`: completed_count == 0 and pending_count == 0
+
+---
+
+### CompletedItem
+
+Represents a completed task from `vault/Done/`.
+
+```python
+@dataclass
+class CompletedItem:
+    """A completed item from Done/."""
+
     file_path: Path
-    title: str                       # filename stem or frontmatter title
-    captured_at: datetime | None     # from frontmatter captured_at, or mtime
-    platform: str | None             # from frontmatter platform (social posts)
-    status: str | None               # from frontmatter status
-    content_preview: str | None      # first 200 chars of body, or frontmatter content_preview
-    amount: float | None             # from frontmatter amount (Accounting records)
-    transaction_type: str | None     # from frontmatter type field (invoice/payment/other)
-    age_days: int                    # computed: (now - captured_at).days
+    subject: str             # From subject: or filename
+    goal_slug: str | None    # From goal: frontmatter
+    completed_at: datetime   # From published_at or captured_at
+    source_type: str         # email, facebook, instagram, x, odoo, etc.
 ```
 
-**Sources**: `Done/`, `Needs_Action/`, `Pending_Approval/`, `Accounting/`
+**Source**: Files in `vault/Done/**/*.md`
+
+**Frontmatter fields used**:
+- `subject:` or filename
+- `goal:` (optional)
+- `published_at:` or `completed_at:` or `captured_at:`
+- `platform:` or `source:` or inferred from path
 
 ---
 
-### 3. GoalsRecord
+### Bottleneck
 
-Parsed representation of `vault/Business_Goals.md`.
+An item stuck in `Needs_Action/` or with an overdue deadline.
 
 ```python
 @dataclass
-class GoalsRecord:
-    raw_text: str                    # full goals content (capped at goals_max_chars)
-    goals: list[str]                 # list of extracted goal lines (numbered/bulleted)
-    goal_count: int                  # len(goals)
+class Bottleneck:
+    """An item identified as a bottleneck."""
+
+    file_path: Path
+    subject: str
+    days_stale: int          # Days since captured_at
+    reason: str              # "stale" or "overdue"
+    category: str            # email, whatsapp, odoo, plans, etc.
+    captured_at: datetime
+    deadline: date | None    # If overdue
 ```
 
-**Parsing**: Extract lines that match `^\s*\d+[\.\)]\s+` (numbered) or `^\s*[-*]\s+`
-(bulleted) as individual goal strings.
+**Identification rules**:
+- **Stale**: `captured_at` > 7 days ago AND file is in `Needs_Action/`
+- **Overdue**: `deadline:` frontmatter < today
 
 ---
 
-### 4. BriefingContext
+### AccountingSummary
 
-Aggregated, structured data assembled from all vault sources before the LLM call.
-Serialisable to JSON for logging, debugging, and token-capping.
+Aggregated accounting data from `vault/Accounting/`.
 
 ```python
 @dataclass
-class BriefingContext:
-    run_date: datetime
-    lookback_days: int
-    goals: GoalsRecord | None
-    completed: list[VaultRecord]           # Done/ files within lookback window
-    needs_action: list[VaultRecord]        # Needs_Action/ files (all, for bottleneck scan)
-    pending_approval: list[VaultRecord]    # Pending_Approval/ files (all, for bottleneck scan)
-    accounting: list[VaultRecord]          # Accounting/ files within lookback window
-    bottlenecks: list[VaultRecord]         # subset of needs_action + pending_approval older than bottleneck_days
-    sources_scanned: list[str]             # list of directory paths that were read
-    sources_missing: list[str]             # list of directories that did not exist
-    total_revenue: float                   # sum of accounting amounts (type: invoice, status: paid)
-    total_pending_invoices: float          # sum of amounts (type: invoice, status: draft/sent)
+class AccountingSummary:
+    """Summary of accounting activity in the period."""
 
-    def to_json(self, max_tokens: int) -> str: ...  # truncate to token budget before LLM call
+    total_invoiced: Decimal      # Sum of invoice amounts
+    invoice_count: int
+    total_paid: Decimal          # Sum of payment amounts
+    payment_count: int
+    overdue_invoices: list[OverdueInvoice]
+    has_data: bool               # False if Accounting/ empty or missing
 ```
+
+```python
+@dataclass
+class OverdueInvoice:
+    """An overdue invoice flagged in Bottlenecks."""
+
+    file_path: Path
+    partner: str
+    amount: Decimal
+    due_date: date
+    days_overdue: int
+```
+
+**Source**: Files in `vault/Accounting/invoices/` and `vault/Accounting/payments/`
+
+**Frontmatter fields used**:
+- `amount:` (parsed as Decimal)
+- `status:` (overdue detection)
+- `odoo_partner:` or `partner:`
+- `due_date:` or inferred
 
 ---
 
-### 5. Briefing (vault output)
+### UpcomingDeadline
 
-File written to `vault/Briefings/YYYY-MM-DD_Monday_Briefing.md`.
+An item with a deadline in the next 7 days.
 
-**YAML frontmatter**:
+```python
+@dataclass
+class UpcomingDeadline:
+    """An item with an upcoming deadline."""
+
+    file_path: Path
+    subject: str
+    deadline: date
+    days_until: int          # Negative if overdue (should be in Bottlenecks)
+    category: str
+```
+
+**Source**: Any vault file with `deadline:` frontmatter
+
+**Rules**:
+- Include if `deadline:` is within [today, today + 7 days]
+- Exclude if `deadline:` < today (goes to Bottlenecks instead)
+- Sort by deadline date ascending
+
+---
+
+### ProactiveSuggestion
+
+A rule-based suggestion for the CEO.
+
+```python
+@dataclass
+class ProactiveSuggestion:
+    """A proactive suggestion based on observed patterns."""
+
+    category: str            # email_backlog, social_activity, accounting, etc.
+    message: str             # Human-readable suggestion
+    severity: Literal["info", "warning"]
+    threshold_met: str       # e.g., ">5 items in Needs_Action/email/"
+```
+
+**Suggestion rules** (hardcoded thresholds):
+
+| Rule | Threshold | Message |
+|------|-----------|---------|
+| Email backlog | >5 items in Needs_Action/email/ | Consider scheduling time to process email backlog |
+| WhatsApp backlog | >3 items in Needs_Action/whatsapp/ | WhatsApp messages need attention |
+| High social activity | >10 posts in Done/facebook/ + Done/instagram/ + Done/x/ | Strong social media week; consider content calendar review |
+| Overdue invoices | >0 overdue invoices | Outstanding invoices require follow-up |
+| Stale plans | >3 items in Needs_Action/plans/ older than 7 days | Triage backlog accumulating |
+
+---
+
+## Output Entities
+
+### CEOBriefing
+
+The final markdown file written to `vault/Briefings/`.
+
+**Filename format**: `YYYY-MM-DD_Monday_Briefing.md` or `YYYY-MM-DD_Adhoc_Briefing.md`
+
+**Frontmatter**:
 
 ```yaml
 ---
-type: briefing
-generated_at: 2026-04-21T08:00:00Z
-lookback_days: 7
-sources_scanned:
-  - vault/Done/
-  - vault/Needs_Action/
-  - vault/Accounting/
-sources_missing: []
-synthesis: llm            # or: template_fallback
-completed_count: 14
-bottleneck_count: 2
-accounting_total: 4250.00
+type: ceo_briefing
+generated_at: "2026-04-18T09:00:00Z"
+period_start: "2026-04-11"
+period_end: "2026-04-18"
+status: generated
 ---
 ```
 
-**Body sections** (all six required):
+**Sections** (in order):
 
-```markdown
-## Executive Summary
-<!-- Goals progress + overall week narrative -->
-
-## Revenue / Business Summary
-<!-- Accounting events from past 7 days, total -->
-
-## Completed Tasks
-<!-- Done/ files from past 7 days, grouped by platform/type -->
-
-## Bottlenecks
-<!-- Items in Needs_Action/ and Pending_Approval/ older than threshold -->
-
-## Proactive Suggestions
-<!-- LLM-generated or template recommendations based on context -->
-
-## Upcoming Deadlines
-<!-- Items with due_date frontmatter field within next 7 days -->
-```
+1. **Executive Summary** — 3–5 bullet points
+2. **Goals Progress** — Table of goals with status indicators (if Business_Goals.md exists)
+3. **Revenue/Business Summary** — Accounting totals and notable items
+4. **Completed Tasks** — Grouped by goal if tags exist, otherwise by source type
+5. **Bottlenecks** — Stale items and overdue deadlines
+6. **Proactive Suggestions** — Rule-based recommendations
+7. **Upcoming Deadlines** — Items due in next 7 days
 
 ---
 
-### 6. Signal (vault output)
+### BriefingLogEntry
 
-File written to `vault/Signals/<YYYY-MM-DD>-<signal_type>-<8-char-hash>.md`.
+Log entry written to `vault/Logs/` after briefing generation.
 
-**YAML frontmatter**:
+**Frontmatter**:
 
 ```yaml
 ---
-type: signal
-signal_type: bottleneck           # or: stale_approval | suggestion
-source_path: vault/Needs_Action/email/2026-04-10-invoice-followup.md
-age_days: 11
-captured_at: 2026-04-10T09:30:00Z
-generated_at: 2026-04-21T08:00:00Z
+log_id: "2026-04-18T09-00-00-briefing_generation-monday-briefing"
+timestamp: "2026-04-18T09:00:00"
+action_type: briefing_generation
+source_path: "/path/to/vault"
+dest_path: "Briefings/2026-04-18_Monday_Briefing.md"
+outcome: success
+details: "Generated Monday briefing with 12 completed items, 3 bottlenecks, 2 suggestions"
 ---
-```
-
-**Body**: One-line description of the detected signal.
-
----
-
-### 7. LogEntry (vault audit)
-
-Appended to `vault/Logs/ceo_briefing-YYYY-MM-DD.md` (date-partitioned log file).
-Follows the 6-field Constitution Principle IX format.
-
-```yaml
-timestamp: 2026-04-21T08:01:23Z
-action_type: generate_briefing
-source_path: vault/
-dest_path: vault/Briefings/2026-04-21_Monday_Briefing.md
-outcome: success                # or: failure | partial
-details: "lookback_days=7; completed=14; bottlenecks=2; synthesis=llm; signals_written=2"
 ```
 
 ---
 
-## State Transitions
-
-### Briefing File Lifecycle
+## Entity Relationships
 
 ```
-[Not exists]
-    │
-    ▼  ceo_briefing run
-[vault/Briefings/YYYY-MM-DD_Monday_Briefing.md]   ← overwritten on same-day re-run
-```
-
-### Signal File Lifecycle
-
-```
-[Not exists]
-    │
-    ▼  ceo_briefing run (bottleneck detected)
-[vault/Signals/<date>-<type>-<hash>.md]   ← overwritten on re-run (same source → same filename)
-```
-
-### Source Files (read-only)
-
-```
-vault/Done/          ──read──►  BriefingContext.completed
-vault/Needs_Action/  ──read──►  BriefingContext.needs_action + bottlenecks
-vault/Pending_Approval/ ──read──►  BriefingContext.pending_approval + bottlenecks
-vault/Accounting/    ──read──►  BriefingContext.accounting
-vault/Business_Goals.md ──read──►  BriefingContext.goals
-
-[NO STATE CHANGE on source files]
+Business_Goals.md ──► BusinessGoal ──┐
+                                     │
+                                     ├──► GoalProgress
+Done/**/*.md ────► CompletedItem ────┤
+                                     │
+                                     ├──► BriefingData ──► BriefingWriter ──► CEOBriefing
+Needs_Action/**/*.md ──► Bottleneck ─┤                                              │
+                                     │                                              ▼
+Accounting/**/*.md ──► AccountingSummary                                    vault/Briefings/
+                                     │
+*.md with deadline: ──► UpcomingDeadline
+                                     │
+(Rule engine) ──► ProactiveSuggestion
 ```
 
 ---
 
-## Relationships
+## Validation Rules
 
-```
-BriefingConfig
-    │ drives
-    ▼
-VaultSource readers ──produces──► VaultRecord (list)
-                                           │
-                                           ▼
-                                  BriefingContext (aggregated)
-                                           │
-                          ┌────────────────┼───────────────────┐
-                          ▼                ▼                   ▼
-                    Synthesiser        SignalWriter         LogEntry
-                          │                │                   │
-                          ▼                ▼                   ▼
-                     Renderer        vault/Signals/      vault/Logs/
-                          │
-                          ▼
-                  vault/Briefings/
-```
+### CompletedItem
+
+- `captured_at` or `completed_at` MUST be parseable ISO 8601
+- Items outside the 7-day period are excluded
+- Malformed YAML: skip file, add to `data_gaps`
+
+### Bottleneck
+
+- `captured_at` MUST be parseable
+- `days_stale` computed as (today - captured_at).days
+- Only include if days_stale > 7 OR deadline is overdue
+
+### AccountingSummary
+
+- `amount:` MUST be numeric (int or float)
+- Non-numeric amounts: skip file, add to `data_gaps`
+- Missing `vault/Accounting/`: set `has_data = False`
+
+### UpcomingDeadline
+
+- `deadline:` MUST be parseable YYYY-MM-DD
+- Invalid dates: skip file, add to `data_gaps`
+- Past deadlines: route to Bottlenecks, not UpcomingDeadlines
+
+---
+
+## No External Persistence
+
+All data structures are in-memory only. No database, cache, or external storage is used.
+The briefing generator is stateless — each run reads from vault and writes output fresh.

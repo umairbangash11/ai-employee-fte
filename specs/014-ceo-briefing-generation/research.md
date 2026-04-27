@@ -1,213 +1,259 @@
 # Research: Gold Phase 4 — CEO Briefing Generation
 
-**Branch**: `014-ceo-briefing-generation`
-**Date**: 2026-04-17
-**Phase**: Phase 0 output of `/sp.plan`
+**Feature Branch**: `014-ceo-briefing-generation`
+**Date**: 2026-04-18
+**Status**: Complete
 
 ---
 
-## R-001: Vault Scanning Strategy
+## Research Task 1: Vault YAML Frontmatter Patterns
 
-**Decision**: Use `pathlib.glob()` with a configurable lookback window. For files with YAML
-frontmatter, prefer `captured_at` field for date comparison; fall back to `st_mtime` when
-`captured_at` is absent.
+### Findings
 
-**Rationale**: This pattern is already established across all Gold-tier vault modules
-(instagram_publisher, x_publisher, sentinel watcher). Zero new dependencies. Handles both
-well-formed frontmatter files and raw files equally. The lookback filter bounds the read
-set to O(files_in_window) regardless of total vault size.
+Examined existing vault file patterns across the codebase:
 
-**Alternatives considered**:
-- SQLite index of vault files: overkill for a weekly batch scanner; adds a dep and
-  a schema-migration surface.
-- watchdog event stream: wrong execution model — briefing is batch (triggered), not
-  streaming (continuous).
-- Walk all files then filter: correct but potentially slow on large vaults — the lookback
-  pre-filter by mtime before opening files avoids unnecessary reads.
-
----
-
-## R-002: LLM Synthesis Approach
-
-**Decision**: Single structured GPT-4o call per run. Pass the `BriefingContext` as a JSON
-blob in the user message. Use a system prompt that instructs the model to produce all six
-briefing sections as a Markdown document. Parse the response directly into the renderer.
-
-**Rationale**: `openai>=1.0` is already installed (Silver Tier email reasoning). A single
-call is simpler to retry (Ralph Wiggum Loop wraps one call, not six) and produces more
-coherent narrative than six independent calls that cannot reference each other. JSON
-context gives the LLM structured, unambiguous data.
-
-**Token budget**: `BriefingContext` JSON is capped at `BRIEFING_CONTEXT_MAX_TOKENS`
-(default: 6000 tokens) before the call. Goals content is separately capped at
-`BRIEFING_GOALS_MAX_CHARS` (default: 4000 chars). This keeps total prompt within GPT-4o's
-128k context while avoiding unnecessary cost.
-
-**Alternatives considered**:
-- One LLM call per section: 6× the API calls, 6× the failure surface, no cross-section
-  coherence (e.g., the Suggestions section cannot reference the Bottlenecks section).
-- Streaming response: unnecessary complexity for a weekly batch job; adds retry
-  complexity.
-- Claude API: preference is OpenAI for this project (existing OPENAI_API_KEY
-  infrastructure from Silver Tier email reasoning).
-
----
-
-## R-003: Scheduling Strategy
-
-**Decision**: Use the `schedule` Python library (v1.2+) in `watch` mode. The scheduler
-runs in the main thread with a `time.sleep(60)` poll loop. SIGINT/SIGTERM handlers shut
-it down cleanly.
-
-**Rationale**: `schedule` is the simplest weekly-trigger solution in the Python
-ecosystem — it adds one lightweight dependency, requires no daemon, and integrates
-naturally with a `while True: schedule.run_pending(); sleep(60)` loop. The watch command
-is intended for running as a background service (e.g., via systemd or `nohup`), not as a
-long-lived interactive process.
-
-**Alternatives considered**:
-- APScheduler: much heavier (persistent job stores, multiple executor types). The briefing
-  use case needs exactly one weekly job — APScheduler is over-engineered.
-- cron: OS-level; not portable; cannot be configured from `.env`; no Python-land
-  graceful shutdown.
-- asyncio sleep loop: `asyncio.sleep(604800)` for one week is fragile and makes
-  on-demand triggering harder to test.
-
-**New dependency**: `schedule>=1.2` — add to `pyproject.toml` `[project.dependencies]`.
-
----
-
-## R-004: Signal File Idempotency
-
-**Decision**: Signal file slug is derived from the SHA-1 hash of the source file's
-absolute path. On re-run, writing the same signal overwrites the previous file silently.
-Filename format: `vault/Signals/<YYYY-MM-DD>-<signal_type>-<8-char-hash>.md`.
-
-**Rationale**: Hash of source path guarantees the same source always maps to the same
-signal filename — no duplicates on re-run, no state file needed. The date prefix keeps
-signals chronologically ordered in directory listings. 8 hex chars (32-bit) is sufficient
-for collision avoidance within a week's signal set (typically <100 files).
-
-**Alternatives considered**:
-- Timestamp-based slug: creates duplicate signals on re-run (defeats the purpose of
-  idempotent re-run from FR-008).
-- External state file (e.g., `.watcher-state/briefing.json`) tracking emitted signals:
-  adds state management complexity; hash-based approach achieves the same without state.
-- Full SHA-256: unnecessary length for a slug; 8 chars is sufficient.
-
----
-
-## R-005: Template Fallback Format
-
-**Decision**: When OpenAI is unavailable (any exception from the `openai` client),
-synthesiser falls back to a pre-formatted Markdown template that populates each section
-with structured lists drawn directly from `BriefingContext` (file names, counts, amounts).
-No narrative prose — pure data. The briefing frontmatter records `synthesis:
-template_fallback`.
-
-**Rationale**: The fallback must always produce a valid, complete briefing (SC-004). A
-structured-list format is readable, honest about the absence of narrative synthesis, and
-requires no additional dependencies. The `synthesis` field in frontmatter lets operators
-identify template-mode briefings for follow-up.
-
-**Alternatives considered**:
-- Abort generation on API failure: violates SC-004 and FR-015 (graceful degradation).
-- Partial generation (LLM for some sections, template for others): harder to implement,
-  harder to audit, inconsistent output format.
-- Cache last successful LLM output: stale data worse than honest template output.
-
----
-
-## R-006: YAML Frontmatter Parsing
-
-**Decision**: Use `pyyaml` + `re` split on `---` delimiters. Reuse the existing
-`read_frontmatter()` / `write_frontmatter()` utility pattern from the social publisher
-packages. Extract into `ceo_briefing/utils.py` with no duplication.
-
-**Rationale**: `pyyaml` is already installed; the regex-split approach is already proven
-across eight vault modules. No new dependency (`python-frontmatter` would add one without
-benefit).
-
-**Alternatives considered**:
-- `python-frontmatter` library: clean API but new dep; the existing two-function pattern
-  is already sufficient and well-understood.
-- Manual string parsing: fragile; already had a bug with `## Content` vs
-  `## Content Preview` in Phase 3.
-
----
-
-## R-007: Briefing File Naming
-
-**Decision**: `vault/Briefings/YYYY-MM-DD_Monday_Briefing.md` where `YYYY-MM-DD` is the
-**actual run date** (not necessarily a Monday). The `_Monday_Briefing` suffix is a
-semantic label, not a day guard. Running on a Tuesday still produces
-`2026-04-21_Monday_Briefing.md`.
-
-**Rationale**: The user spec explicitly names the file `YYYY-MM-DD_Monday_Briefing.md`.
-The "Monday" is a branding label for the briefing type, not an enforcement gate. The
-actual-date prefix allows multiple briefings per week if needed (e.g., a re-run after
-corrections). Idempotency (FR-008) means same-day re-runs overwrite cleanly.
-
-**Alternatives considered**:
-- ISO week number prefix (`2026-W17_Monday_Briefing.md`): less readable; week-number
-  collisions across years.
-- Guard execution to Mondays only: over-constraining; the operator should be able to
-  generate the briefing on demand any day.
-
----
-
-## R-008: Package Dependencies
-
-**Decision**: Add exactly one new dependency to `pyproject.toml`:
-
-```toml
-"schedule>=1.2",
+**Email files** (`gmail_watcher/writer.py`):
+```yaml
+source: gmail
+captured_at: "2026-04-18T14:30:00Z"
+sender: "Name <email@example.com>"
+subject: "Subject line"
+urgency: normal | urgent
+status: unread
+tags: [inbox, email]
 ```
 
-All other required packages are already installed:
-- `openai>=1.0` — LLM synthesis (Silver Tier email reasoning)
-- `pyyaml` — frontmatter parsing (all vault modules)
-- `python-dotenv` — `.env` loading (all vault modules)
-- `click` — CLI (all Gold Tier publishers)
-- `pathlib`, `datetime`, `re`, `json`, `hashlib`, `time`, `signal` — stdlib only
+**Social post files** (`social_drafters/drafter.py`):
+```yaml
+type: pending_action
+action_type: publish_post
+platform: facebook | instagram | x
+status: awaiting_approval | published
+source_path: "..."
+dest_path: "..."
+captured_at: "2026-04-18T14:30:00Z"
+content_preview: "First 100 chars..."
+```
 
-**Rationale**: Minimal dependency footprint per Constitution Principle I (local-first,
-minimal external surface). `schedule` has no transitive dependencies.
+**Done files** (moved from Approved):
+```yaml
+status: published | executed
+post_url: "https://..." (optional)
+published_at: "2026-04-18T14:30:00Z"
+```
+
+**Accounting files** (`odoo_accounting/vault_writer.py`):
+```yaml
+type: pending_action | accounting_record
+action_type: create_invoice | prepare_payment | reconcile_payment
+status: awaiting_approval | executed
+odoo_partner: "Partner Name"
+odoo_payload: "{...}" (JSON string)
+amount: 1234.56 (added in proposal body, not frontmatter)
+```
+
+**Log files** (`sentinel/logger.py`):
+```yaml
+log_id: "timestamp-action-slug"
+timestamp: "2026-04-18T14:30:00Z"
+action_type: file_move | briefing_generation | ...
+source_path: "..."
+dest_path: "..."
+outcome: success | failure | partial
+details: "..."
+```
+
+### Decision
+
+**Use `captured_at` as the canonical timestamp field** for determining item age.
+- For Done/ items, use `published_at` or `completed_at` if present, fallback to `captured_at`
+- For deadline detection, use `deadline:` frontmatter field (ISO 8601 date)
+- For goal alignment, use `goal:` frontmatter field (slug matching Business_Goals.md)
+
+**Rationale**: Consistent with existing patterns; no new field names needed.
 
 **Alternatives considered**:
-- APScheduler: 4 transitive deps; overkill for one weekly job.
-- No new dep (manual sleep loop): `while True: check_if_monday(); sleep(3600)` — brittle
-  DST handling, no holiday awareness, harder to test.
+- `created_at` — not used consistently; rejected
+- File modification time — unreliable after moves; rejected
 
 ---
 
-## R-009: Credential Redaction
+## Research Task 2: Slug/Deduplication Patterns
 
-**Decision**: Before writing any vault file (briefing, signal, or log), apply a simple
-regex scrub for common credential patterns: API keys (`sk-...`, `Bearer ...`), email/
-password pairs, and `.env`-style `KEY=value` lines. Replace matches with `[REDACTED]`.
+### Findings
 
-**Rationale**: Constitution Principle VII mandates redaction of credentials in vault
-content. The risk is low (briefing reads structured vault files, not raw emails) but
-the mandate is unconditional. A 5-pattern regex is sufficient for the threat model.
+**Pattern 1: `orchestrator/plan_writer.py`**
+
+```python
+def _safe_slug(subject: str) -> str:
+    slug = subject.lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", slug)
+    slug = re.sub(r"-+", "-", slug)
+    slug = slug.strip("-")
+    return slug[:40].rstrip("-")
+
+def _deduplicate_path(plans_dir: Path, filename: str) -> Path:
+    candidate = plans_dir / filename
+    if not candidate.exists():
+        return candidate
+    stem = Path(filename).stem
+    suffix = Path(filename).suffix
+    counter = 1
+    while True:
+        new_name = f"{stem}_{counter}{suffix}"
+        candidate = plans_dir / new_name
+        if not candidate.exists():
+            return candidate
+        counter += 1
+```
+
+**Pattern 2: `odoo_accounting/vault_writer.py`**
+
+```python
+def _unique_path(target: Path) -> Path:
+    if not target.exists():
+        return target
+    stem = target.stem
+    suffix = target.suffix
+    parent = target.parent
+    counter = 1
+    while True:
+        candidate = parent / f"{stem}-{counter}{suffix}"
+        if not candidate.exists():
+            return candidate
+        counter += 1
+```
+
+### Decision
+
+**Adopt Pattern 2 (`_unique_path`) for briefing filenames**.
+
+Filename format: `YYYY-MM-DD_Monday_Briefing.md` or `YYYY-MM-DD_Adhoc_Briefing.md`
+Deduplication: `YYYY-MM-DD_Adhoc_Briefing-2.md`, `YYYY-MM-DD_Adhoc_Briefing-3.md`, etc.
+
+**Rationale**: Consistent with Odoo accounting pattern; hyphen separator is cleaner than underscore for counters.
 
 **Alternatives considered**:
-- Full PII detection (presidio, spaCy NER): massively over-engineered for a vault that
-  already enforces credential isolation upstream.
-- No redaction: violates Constitution Principle VII.
+- Underscore counter (`_2.md`) — used by plan_writer but hyphen is more readable
+- UUID suffix — rejected; less human-readable
 
 ---
 
-## Summary — Resolved Clarifications
+## Research Task 3: Logging Integration
 
-| # | Item | Resolution |
-|---|------|-----------|
-| R-001 | Vault scanning | pathlib.glob + mtime/captured_at lookback |
-| R-002 | LLM synthesis | Single GPT-4o call, JSON context, capped tokens |
-| R-003 | Scheduling | `schedule` library, watch mode, 60s poll |
-| R-004 | Signal idempotency | Hash-of-source-path slug, overwrite on re-run |
-| R-005 | LLM fallback | Template mode with structured lists, `synthesis: template_fallback` |
-| R-006 | Frontmatter parsing | pyyaml + re, reuse existing pattern |
-| R-007 | Briefing filename | `YYYY-MM-DD_Monday_Briefing.md` (actual run date) |
-| R-008 | New dependencies | `schedule>=1.2` only |
-| R-009 | Credential redaction | 5-pattern regex scrub before any vault write |
+### Findings
+
+**`sentinel/logger.py` signature**:
+
+```python
+def write_log_entry(
+    logs_dir: Path,
+    action_type: str,
+    source_path: Path,
+    dest_path: Path,
+    file_size: int,
+    outcome: str,
+    details: str = "",
+) -> Path:
+```
+
+**Required fields** (per Constitution Principle IX):
+1. `timestamp` — auto-generated in ISO 8601
+2. `action_type` — passed as parameter
+3. `source_path` — passed as parameter
+4. `dest_path` — passed as parameter
+5. `outcome` — `success` | `failure` | `partial`
+6. `details` — human-readable description
+
+### Decision
+
+**Use `action_type: briefing_generation`** for all CEO briefing log entries.
+
+Briefing-specific logging wrapper:
+
+```python
+def log_briefing_generation(
+    logs_dir: Path,
+    vault_path: Path,
+    briefing_path: Path,
+    outcome: str,
+    details: str = "",
+) -> Path:
+    return write_log_entry(
+        logs_dir=logs_dir,
+        action_type="briefing_generation",
+        source_path=vault_path,  # vault root as source
+        dest_path=briefing_path,
+        file_size=briefing_path.stat().st_size if briefing_path.exists() else 0,
+        outcome=outcome,
+        details=details,
+    )
+```
+
+**Rationale**: Reuses existing logger; adds briefing-specific context.
+
+**Alternatives considered**:
+- Custom briefing logger — rejected; unnecessary duplication
+- Separate log file — rejected; violates single `/Logs` directory principle
+
+---
+
+## Research Task 4: Business_Goals.md Format
+
+### Findings
+
+No existing `Business_Goals.md` template in the codebase. Per spec assumption:
+
+> `Business_Goals.md` is a single markdown file in the vault root with a consistent format:
+> `## Goal: <title>` headings with descriptive text underneath.
+
+### Decision
+
+**Define canonical Business_Goals.md format**:
+
+```markdown
+# Business Goals
+
+## Goal: Increase Revenue
+
+Target: $100k MRR by Q3 2026
+Description: Focus on enterprise sales and upselling existing customers.
+
+## Goal: Launch Product V2
+
+Target: July 2026
+Description: Complete feature set including advanced analytics and API.
+
+## Goal: Improve Customer Retention
+
+Target: <5% monthly churn
+Description: Implement proactive support and success programs.
+```
+
+**Goal parsing rules**:
+1. Look for `## Goal: <title>` headings
+2. Extract title as slug: lowercase, replace non-alphanumeric with hyphen
+3. Match `goal:` frontmatter in Done/ items against slug
+
+**Example matching**:
+- `## Goal: Increase Revenue` → slug: `increase-revenue`
+- `goal: increase-revenue` frontmatter → matches
+
+**Rationale**: Simple, human-readable, easy to parse with regex.
+
+**Alternatives considered**:
+- YAML frontmatter for goals — rejected; more complex, less readable
+- Separate goal files — rejected; single file is simpler for CEO to maintain
+
+---
+
+## Summary of Research Outcomes
+
+| Topic | Decision | Status |
+|-------|----------|--------|
+| Frontmatter patterns | Use existing `captured_at`, `deadline:`, `goal:` fields | Resolved |
+| Deduplication | Adopt `_unique_path` pattern with hyphen counter | Resolved |
+| Logging | Use `action_type: briefing_generation` with existing logger | Resolved |
+| Business_Goals.md | `## Goal: <title>` headings with slug matching | Resolved |
+
+All NEEDS CLARIFICATION items from Phase 0 are now resolved. Proceed to Phase 1.

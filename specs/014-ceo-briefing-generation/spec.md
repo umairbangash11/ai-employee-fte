@@ -1,208 +1,216 @@
 # Feature Specification: Gold Phase 4 — CEO Briefing Generation
 
 **Feature Branch**: `014-ceo-briefing-generation`
-**Created**: 2026-04-17
+**Created**: 2026-04-18
 **Status**: Draft
 **Phase**: Gold Phase 4 (of 5)
 **Constitution**: v3.0.0
-**Prerequisite**: Gold Phase 3 complete (social media expansion confirmed; vault lifecycle
-patterns for Done/, Needs_Action/, Pending_Approval/ stable and in use)
-
----
+**Prerequisite**: Gold Phase 3 complete (social media expansion, vault lifecycle confirmed)
 
 ## Overview
 
-Implement the Weekly CEO Briefing system for the AI Employee. This phase adds a
-**read-only synthesis layer** that scans the vault — goals, completed work, pending items,
-accounting events, and prior briefings — and produces a single, concise executive Markdown
-file every week: `vault/Briefings/YYYY-MM-DD_Monday_Briefing.md`.
+Build a weekly CEO Briefing system that aggregates business goals, completed work, pending
+work, and accounting/activity data from the vault, then generates a concise executive
+markdown briefing. The briefing provides the CEO with a single-page summary of business
+health, progress, blockers, and recommendations — all derived from existing vault data.
 
-No post is sent. No email is dispatched. No payment is touched. The briefing system is
-strictly an intelligence-gathering and report-writing tool; all its outputs land inside
-the vault. Side-effect-free by design.
-
-A secondary output stream — proactive signals and bottleneck flags — is written to
-`vault/Signals/` so that detected anomalies are available for triage separately from the
-narrative briefing.
+The system is **read-only with respect to external systems**: it reads from the vault,
+generates a briefing markdown file, and writes only to `vault/Briefings/`. It does not
+send emails, post to social media, execute payments, or modify any external system. Human
+distribution of the briefing (if desired) is out of scope.
 
 ---
 
 ## User Scenarios & Testing *(mandatory)*
 
-### User Story 1 — Weekly CEO Briefing Generation (Priority: P1)
+### User Story 1 — Weekly Briefing Generation (Priority: P1)
 
-As the human operator, I want to run a single command on Monday morning and receive a
-freshly generated executive briefing that summarises the week's business activity — goals
-progress, completed work, revenue/accounting events, open bottlenecks, and proactive
-suggestions — so that I can start the week with full situational awareness without
-manually reading every vault folder.
+As a CEO, I want the AI Employee to generate a weekly briefing document every Monday (or
+on demand) that summarizes business goals, completed work, pending items, revenue/accounting
+data, and proactive suggestions — so that I can review the state of the business in under
+5 minutes without reading individual vault files.
 
-**Why this priority**: This is the primary deliverable of Gold Phase 4. Every other user
-story either feeds into this one or extends it. Without the briefing generator, the phase
-has no value.
+**Why this priority**: The core value of Phase 4 is the briefing document itself. Without
+this capability, no other feature in the phase delivers value. This must work end-to-end
+before any enhancements.
 
-**Independent Test**: With a populated vault (containing at least one file in `Done/`,
-one in `Needs_Action/`, one in `Accounting/`, and a `Business_Goals.md`), run:
-`python -m ceo_briefing run`. Confirm `vault/Briefings/<date>_Monday_Briefing.md` is
-created with all six required sections and valid YAML frontmatter. Confirm a 6-field log
-entry appears in `vault/Logs/`.
+**Independent Test**: Populate a test vault with fixture files in `Business_Goals.md`,
+`Done/`, `Needs_Action/`, and `Accounting/`. Trigger briefing generation. Verify a file
+is created at `vault/Briefings/YYYY-MM-DD_Monday_Briefing.md` with all required sections
+and no placeholder text.
 
 **Acceptance Scenarios**:
 
-1. **Given** the vault contains `Business_Goals.md`, files in `Done/`, `Needs_Action/`,
-   and `Accounting/`, **When** `python -m ceo_briefing run` is executed,
-   **Then** a briefing file is written to `vault/Briefings/YYYY-MM-DD_Monday_Briefing.md`
-   containing all six sections, and a 6-field log entry is appended to `vault/Logs/`.
-
-2. **Given** the briefing generator is run twice in the same week,
-   **When** the output filename already exists,
-   **Then** the existing file is overwritten (idempotent re-run) without error, and a
-   new log entry is appended (not replacing the previous one).
-
-3. **Given** one or more vault source directories do not exist (e.g., `Accounting/` is
-   absent), **When** `ceo_briefing run` is executed,
-   **Then** the briefing is generated with a note in the relevant section ("No
-   accounting data available this week") and execution does not abort — graceful
-   degradation per Constitution Principle X.
+1. **Given** the vault contains `Business_Goals.md`, completed items in `Done/`, pending
+   items in `Needs_Action/`, and accounting data in `Accounting/`, **When** the briefing
+   generator runs, **Then** a markdown file is created at
+   `vault/Briefings/YYYY-MM-DD_Monday_Briefing.md` with the current date.
+2. **Given** the briefing generator runs, **When** the output file is inspected, **Then**
+   it contains all required sections: Executive Summary, Revenue/Business Summary,
+   Completed Tasks, Bottlenecks, Proactive Suggestions, and Upcoming Deadlines.
+3. **Given** the briefing is generated, **When** reviewed, **Then** no section contains
+   placeholder text like `[TODO]`, `[PLACEHOLDER]`, or template markers — all content is
+   derived from vault data.
+4. **Given** the vault contains no items in a particular category (e.g., empty `Done/`),
+   **When** the briefing is generated, **Then** the corresponding section states "No items
+   this period" rather than being omitted or showing an error.
+5. **Given** the briefing generator completes, **When** the operation finishes, **Then**
+   a log entry is written to `vault/Logs/` with `action_type: briefing_generation`,
+   `outcome: success`, and all six required fields.
 
 ---
 
-### User Story 2 — Bottleneck and Signal Detection (Priority: P1)
+### User Story 2 — On-Demand Briefing Generation (Priority: P1)
 
-As the human operator, I want the system to automatically flag items that have been
-sitting in `Needs_Action/` or `Pending_Approval/` beyond a configurable age threshold,
-and write those flags as individual signal files to `vault/Signals/`, so that I can
-triage stale items without manually inspecting every folder.
+As a CEO, I want to be able to generate a briefing at any time (not just Mondays), so that
+I can get an up-to-date summary before investor meetings, board calls, or weekly reviews
+regardless of the day.
 
-**Why this priority**: Bottleneck detection is rated P1 alongside briefing generation
-because the briefing's "Bottlenecks" section is fed directly by the signals produced
-here. If this story is absent, the briefing is incomplete.
+**Why this priority**: Flexibility in briefing timing is essential for real-world use.
+Limiting to Mondays only would reduce utility significantly.
 
-**Independent Test**: Create vault files in `Needs_Action/` with `captured_at` dates
-older than the configured threshold (default: 7 days). Run `python -m ceo_briefing run`.
-Confirm one signal file per stale item appears in `vault/Signals/` with correct
-frontmatter (`type: signal`, `signal_type: bottleneck`, `source_path`). Confirm the
-briefing's Bottlenecks section lists those items.
+**Independent Test**: Trigger on-demand briefing generation on a Wednesday. Verify the
+file is created at `vault/Briefings/YYYY-MM-DD_Adhoc_Briefing.md` with the correct date
+and all required sections.
 
 **Acceptance Scenarios**:
 
-1. **Given** a file in `Needs_Action/` has a `captured_at` date older than
-   `BRIEFING_BOTTLENECK_DAYS` (default 7), **When** `ceo_briefing run` is executed,
-   **Then** a signal file is written to `vault/Signals/<slug>-bottleneck.md` with
-   `type: signal`, `signal_type: bottleneck`, `source_path`, `age_days`, and
-   `captured_at` fields, and the item is listed in the briefing's Bottlenecks section.
-
-2. **Given** a file in `Pending_Approval/` has been waiting longer than the threshold,
-   **When** `ceo_briefing run` executes,
-   **Then** a signal of `signal_type: stale_approval` is written to `vault/Signals/`
-   and listed in the briefing's Bottlenecks section.
-
-3. **Given** no items exceed the age threshold, **When** `ceo_briefing run` executes,
-   **Then** no signal files are written and the Bottlenecks section reads
-   "No bottlenecks detected this week."
+1. **Given** an on-demand briefing request, **When** the generator runs, **Then** a file
+   is created at `vault/Briefings/YYYY-MM-DD_Adhoc_Briefing.md` with today's date.
+2. **Given** multiple on-demand briefings are requested on the same day, **When** each
+   generates, **Then** files are created with unique suffixes (e.g., `_Adhoc_Briefing_2.md`)
+   — no overwrites occur.
+3. **Given** an on-demand briefing is generated, **When** compared to a Monday briefing,
+   **Then** both contain the same section structure and the same data aggregation logic —
+   only the filename differs.
 
 ---
 
-### User Story 3 — Business Goals Progress Tracking (Priority: P2)
+### User Story 3 — Business Goals Integration (Priority: P2)
 
-As the human operator, I want the briefing to map completed work (`Done/` files from the
-past 7 days) against the goals defined in `vault/Business_Goals.md`, so that I can see
-at a glance whether the week's output advanced my stated objectives.
+As a CEO, I want the briefing to include my stated business goals and progress against them,
+so that I can see whether the week's work aligned with strategic priorities.
 
-**Why this priority**: Goals tracking elevates the briefing from a raw activity log to an
-executive intelligence report. Rated P2 because the briefing is useful without it (US1
-still delivers), but significantly more valuable with it.
+**Why this priority**: Connecting daily execution to strategic goals is the value-add
+beyond simple task listing. Without this, the briefing is just a status report.
 
-**Independent Test**: Create `vault/Business_Goals.md` with two distinct goals. Add two
-`Done/` files this week whose content mentions one goal and not the other. Run
-`python -m ceo_briefing run`. Confirm the briefing's Executive Summary section references
-goal progress and notes the unmapped goal as having no completed work this week.
+**Independent Test**: Create a `Business_Goals.md` with 3 goals. Populate `Done/` with
+items tagged to those goals. Generate a briefing. Verify the Executive Summary or a
+dedicated Goals Progress section references each goal and summarizes progress.
 
 **Acceptance Scenarios**:
 
-1. **Given** `vault/Business_Goals.md` exists and contains numbered goals, **When**
-   `ceo_briefing run` executes, **Then** the Executive Summary section includes a
-   "Goals this week" sub-section listing each goal with: completed-count, completion
-   status (✅ / ⚠️ / ❌), and relevant `Done/` file references.
-
-2. **Given** `vault/Business_Goals.md` does not exist, **When** `ceo_briefing run`
-   executes, **Then** the Executive Summary notes "Business_Goals.md not found — goals
-   tracking skipped" and execution continues without error.
+1. **Given** `vault/Business_Goals.md` exists with defined goals, **When** the briefing
+   is generated, **Then** the Executive Summary or Goals Progress section lists each goal
+   and a brief progress indicator (on track / at risk / blocked).
+2. **Given** completed items in `Done/` have `goal:` frontmatter tags, **When** the
+   briefing is generated, **Then** those items are grouped under their corresponding goal
+   in the Completed Tasks section.
+3. **Given** a goal has no completed items and no pending items, **When** the briefing is
+   generated, **Then** the goal is flagged as "No activity this period" in the summary.
 
 ---
 
-### User Story 4 — Accounting and Revenue Summary (Priority: P2)
+### User Story 4 — Accounting Data Summary (Priority: P2)
 
-As the human operator, I want the briefing to include a revenue and accounting summary
-drawn from `vault/Accounting/` files created or modified in the past 7 days, so that I
-have a financial snapshot alongside the operational summary.
+As a CEO, I want the briefing to include a revenue/accounting summary derived from vault
+accounting data, so that I can see financial health alongside operational status.
 
-**Why this priority**: P2 because the briefing is operationally useful without financial
-data, but the CEO Briefing is incomplete without a revenue line.
+**Why this priority**: Financial visibility is a core CEO need. Separating accounting
+data into the briefing closes the loop between Odoo integration (Phase 2) and executive
+reporting.
 
-**Independent Test**: Add two Markdown files to `vault/Accounting/` within the trailing
-7-day window, each with `amount`, `type` (invoice/payment), and `status` frontmatter
-fields. Run `python -m ceo_briefing run`. Confirm the briefing's Revenue/Business Summary
-section lists both files, their amounts, and a total. Confirm zero files from outside the
-7-day window are included.
+**Independent Test**: Populate `vault/Accounting/` with invoice and payment markdown files.
+Generate a briefing. Verify the Revenue/Business Summary section includes total revenue,
+outstanding invoices, and recent payments.
 
 **Acceptance Scenarios**:
 
-1. **Given** `vault/Accounting/` contains files from the past 7 days with `amount` and
-   `type` fields, **When** `ceo_briefing run` executes, **Then** the Revenue/Business
-   Summary section lists each file (name, type, amount, status) and a weekly total.
-
-2. **Given** `vault/Accounting/` is absent or empty, **When** `ceo_briefing run`
-   executes, **Then** the Revenue/Business Summary section reads "No accounting
-   activity recorded this week" and execution does not abort.
+1. **Given** `vault/Accounting/invoices/` contains invoice files with `amount:` frontmatter,
+   **When** the briefing is generated, **Then** the Revenue/Business Summary includes
+   total invoiced amount for the period.
+2. **Given** `vault/Accounting/payments/` contains payment files with `amount:` frontmatter,
+   **When** the briefing is generated, **Then** the Revenue/Business Summary includes
+   total payments received for the period.
+3. **Given** accounting data is missing or `vault/Accounting/` does not exist, **When**
+   the briefing is generated, **Then** the Revenue/Business Summary states "No accounting
+   data available" rather than failing.
+4. **Given** invoice or payment files have `status: overdue` frontmatter, **When** the
+   briefing is generated, **Then** the Bottlenecks section flags overdue items.
 
 ---
 
-### User Story 5 — Scheduled and On-Demand Execution (Priority: P3)
+### User Story 5 — Bottleneck and Deadline Identification (Priority: P2)
 
-As the human operator, I want to be able to run the briefing both on demand (via CLI) and
-on a scheduled basis (every Monday at a configured time), so that I receive the briefing
-automatically each week without remembering to run it manually.
+As a CEO, I want the briefing to proactively identify bottlenecks (items stuck in
+`Needs_Action/` for extended periods) and upcoming deadlines, so that I can intervene
+before problems escalate.
 
-**Why this priority**: P3 because the system is fully functional with manual execution.
-Scheduling is a quality-of-life enhancement, not a prerequisite for correctness.
+**Why this priority**: Proactive alerting differentiates a useful briefing from a passive
+summary. This enables the CEO to take action rather than just consume information.
 
-**Independent Test**: Configure `BRIEFING_SCHEDULE=monday` and `BRIEFING_TIME=08:00` in
-`.env`. Run `python -m ceo_briefing watch` — confirm the process starts, logs its
-schedule, and does not exit. Wait for the scheduled time (or mock the clock in a unit
-test). Confirm the briefing is generated at the scheduled time.
+**Independent Test**: Populate `Needs_Action/` with items, some with `captured_at` older
+than 7 days and some with `deadline:` frontmatter. Generate a briefing. Verify the
+Bottlenecks section lists stale items and the Upcoming Deadlines section lists items due
+within 7 days.
 
 **Acceptance Scenarios**:
 
-1. **Given** `BRIEFING_SCHEDULE=monday` and `BRIEFING_TIME=08:00` are set, **When**
-   `python -m ceo_briefing watch` is run, **Then** the process stays alive, logs
-   "Next briefing scheduled for <datetime>", and generates the briefing at the
-   configured time.
+1. **Given** items in `Needs_Action/` have `captured_at` older than 7 days, **When** the
+   briefing is generated, **Then** the Bottlenecks section lists these items as "stale"
+   with the number of days pending.
+2. **Given** items anywhere in the vault have `deadline:` frontmatter within the next
+   7 days, **When** the briefing is generated, **Then** the Upcoming Deadlines section
+   lists these items sorted by deadline date (soonest first).
+3. **Given** no bottlenecks or deadlines exist, **When** the briefing is generated,
+   **Then** the corresponding sections state "No bottlenecks identified" and "No upcoming
+   deadlines" respectively.
+4. **Given** a deadline is overdue (date in the past), **When** the briefing is generated,
+   **Then** the item appears in Bottlenecks with "overdue by N days" rather than Upcoming
+   Deadlines.
 
-2. **Given** no schedule env vars are set, **When** `python -m ceo_briefing run` is
-   executed, **Then** the briefing runs immediately (one-shot mode) and exits.
+---
+
+### User Story 6 — Proactive Suggestions (Priority: P3)
+
+As a CEO, I want the briefing to include proactive suggestions based on observed patterns
+(e.g., many items stuck in `Needs_Action/email/`, high volume of social posts approved),
+so that I can consider process improvements.
+
+**Why this priority**: Suggestions add intelligence beyond data aggregation. Lower priority
+because the briefing is valuable without them, but they differentiate the AI Employee.
+
+**Independent Test**: Populate `Needs_Action/email/` with 10+ items. Generate a briefing.
+Verify the Proactive Suggestions section includes a suggestion about email backlog.
+
+**Acceptance Scenarios**:
+
+1. **Given** `Needs_Action/email/` contains more than 5 items, **When** the briefing is
+   generated, **Then** the Proactive Suggestions section includes a recommendation to
+   address email backlog.
+2. **Given** `Done/facebook/` + `Done/instagram/` + `Done/x/` contain more than 10 items
+   in the period, **When** the briefing is generated, **Then** a suggestion acknowledges
+   high social media activity and suggests content calendar review.
+3. **Given** no notable patterns are detected, **When** the briefing is generated, **Then**
+   the Proactive Suggestions section states "No suggestions this period" rather than
+   being omitted.
 
 ---
 
 ### Edge Cases
 
-- What happens when `vault/Done/` contains thousands of files? — The scanner MUST apply
-  a 7-day lookback window (configurable via `BRIEFING_LOOKBACK_DAYS`) to bound the
-  read set. Only files with `captured_at` or `mtime` within the window are included.
-- What happens when GPT-4o is unavailable (API key missing or rate limited)? — The
-  system falls back to a template-based briefing (structured lists with no LLM
-  synthesis) and writes `synthesis: template_fallback` in the briefing frontmatter. A
-  log entry with `outcome: partial` is written. Execution does not abort.
-- What happens when a vault source file has no YAML frontmatter? — The parser skips the
-  file, logs a warning, and continues. The briefing notes the count of skipped files.
-- What happens if `vault/Briefings/` does not exist? — `ensure_vault_dirs` creates it
-  automatically at startup (same pattern as Gold Phase 3 publishers).
-- What happens when `Business_Goals.md` is very long (>10,000 words)? — Only the first
-  `BRIEFING_GOALS_MAX_CHARS` characters (default: 4000) are passed to the LLM context
-  to stay within token budget.
-- What happens if the briefing generator is run on a non-Monday? — It generates
-  the briefing immediately in `run` mode (no guard). In `watch` mode, it waits for
-  the next Monday trigger. The filename always reflects the actual run date.
+- `Business_Goals.md` does not exist → briefing is still generated; Goals Progress section
+  states "No business goals defined."
+- `vault/Accounting/` does not exist → Revenue/Business Summary states "No accounting data
+  available."
+- `vault/Done/` is empty → Completed Tasks section states "No items completed this period."
+- Briefing file already exists for today's date → append numeric suffix (e.g., `_2.md`,
+  `_3.md`); never overwrite.
+- Frontmatter in vault files is malformed (missing fields) → skip the file, log a warning,
+  continue generating the briefing with available data.
+- `vault/Briefings/` directory does not exist → create it before writing; do not fail.
+- Generator encounters a file read error → log the error, continue with available data,
+  include a "Data Gaps" note in the briefing footer.
 
 ---
 
@@ -210,65 +218,55 @@ test). Confirm the briefing is generated at the scheduled time.
 
 ### Functional Requirements
 
-- **FR-001**: System MUST scan `vault/Done/`, `vault/Needs_Action/`,
-  `vault/Pending_Approval/`, `vault/Accounting/`, and `vault/Briefings/` as input sources.
-- **FR-002**: System MUST read `vault/Business_Goals.md` when present; skip gracefully
-  when absent.
-- **FR-003**: System MUST produce a briefing file at
-  `vault/Briefings/<YYYY-MM-DD>_Monday_Briefing.md` with valid YAML frontmatter and all
-  six required sections.
-- **FR-004**: The six required briefing sections are: **Executive Summary**, **Revenue /
-  Business Summary**, **Completed Tasks**, **Bottlenecks**, **Proactive Suggestions**,
-  **Upcoming Deadlines**.
-- **FR-005**: System MUST apply a configurable lookback window (default: 7 days) when
-  scanning `Done/` and `Accounting/` to limit the data set.
-- **FR-006**: System MUST detect stale items in `Needs_Action/` and `Pending_Approval/`
-  older than `BRIEFING_BOTTLENECK_DAYS` (default: 7 days) and write one signal file per
-  stale item to `vault/Signals/`.
-- **FR-007**: Signal files MUST use canonical frontmatter: `type: signal`,
-  `signal_type: bottleneck | stale_approval | other`, `source_path`, `age_days`,
-  `captured_at`, `generated_at`.
-- **FR-008**: Briefing generation MUST be idempotent — re-running in the same week
-  overwrites the existing briefing file without error.
-- **FR-009**: System MUST use OpenAI GPT-4o (model configurable via `OPENAI_MODEL`) to
-  synthesise the narrative sections of the briefing; fallback to template mode if the
-  API is unavailable.
-- **FR-010**: System MUST write a 6-field log entry to `vault/Logs/` on every run
-  (success, failure, or partial) per Constitution Principle IX.
-- **FR-011**: System MUST NOT write to any external system — no emails, no social posts,
-  no Odoo writes, no payment calls. All outputs are vault-local files only.
-- **FR-012**: System MUST NOT move, rename, or delete any vault files it reads. All vault
-  source access is read-only.
-- **FR-013**: System MUST expose a CLI with at least two subcommands: `run` (one-shot)
-  and `watch` (scheduled, stays alive).
-- **FR-014**: System MUST call `ensure_vault_dirs` at startup to create `Briefings/`,
-  `Signals/`, and `Logs/` if absent.
-- **FR-015**: System MUST handle missing source directories gracefully — absence of any
-  source directory MUST produce a note in the relevant briefing section, not an abort.
-- **FR-016**: System MUST redact any content that appears to contain credentials before
-  writing to the briefing or signal files (per Constitution Principle VII).
+- **FR-001**: The system MUST generate a weekly briefing file at
+  `vault/Briefings/YYYY-MM-DD_Monday_Briefing.md` when triggered on a Monday (scheduled
+  or manual).
+- **FR-002**: The system MUST generate an on-demand briefing file at
+  `vault/Briefings/YYYY-MM-DD_Adhoc_Briefing.md` when triggered on any other day.
+- **FR-003**: The briefing MUST contain the following sections in order: Executive Summary,
+  Goals Progress (if `Business_Goals.md` exists), Revenue/Business Summary, Completed
+  Tasks, Bottlenecks, Proactive Suggestions, Upcoming Deadlines.
+- **FR-004**: The system MUST read from vault sources: `Business_Goals.md`, `Done/`,
+  `Needs_Action/`, `Accounting/`, and existing `Briefings/` (for continuity reference).
+- **FR-005**: The system MUST NOT modify any external system — it is read-only with
+  respect to email, social media, accounting platforms, and all external services.
+- **FR-006**: The system MUST NOT send the briefing via email, post it to social media,
+  or distribute it in any way — distribution is a human responsibility.
+- **FR-007**: The system MUST append a numeric suffix to the filename if a briefing for
+  the same date already exists — never overwrite.
+- **FR-008**: The system MUST create `vault/Briefings/` if it does not exist.
+- **FR-009**: The system MUST log every briefing generation to `vault/Logs/` with all
+  six required fields: `timestamp`, `action_type`, `source_path`, `dest_path`, `outcome`,
+  `details`.
+- **FR-010**: The system MUST gracefully handle missing data sources (empty directories,
+  missing files) by including "No data available" text in the corresponding section —
+  never fail the entire briefing due to partial data.
+- **FR-011**: Items in `Needs_Action/` with `captured_at` older than 7 days MUST be
+  flagged as bottlenecks in the Bottlenecks section.
+- **FR-012**: Items with `deadline:` frontmatter within the next 7 days MUST be listed
+  in the Upcoming Deadlines section, sorted by date (soonest first).
+- **FR-013**: Overdue deadlines (past date) MUST appear in the Bottlenecks section, not
+  Upcoming Deadlines.
+- **FR-014**: Malformed vault files (missing or invalid frontmatter) MUST be skipped with
+  a warning log, not cause the briefing to fail.
+- **FR-015**: The briefing generator MUST follow the Ralph Wiggum Loop (3 attempts) for
+  any vault read failures before logging a failure and continuing.
 
 ### Key Entities
 
-- **Briefing** (`vault/Briefings/YYYY-MM-DD_Monday_Briefing.md`): The primary output.
-  Has YAML frontmatter (`type: briefing`, `generated_at`, `lookback_days`,
-  `sources_scanned`, `synthesis: llm | template_fallback`) and six body sections.
+- **CEOBriefing**: A markdown file in `vault/Briefings/` containing the executive summary.
+  Required frontmatter: `type: ceo_briefing`, `generated_at` (ISO 8601), `period_start`,
+  `period_end`, `status: generated`.
 
-- **Signal** (`vault/Signals/<slug>-<signal_type>.md`): A secondary output capturing a
-  single detected anomaly or proactive suggestion. Has frontmatter (`type: signal`,
-  `signal_type`, `source_path`, `age_days`, `captured_at`, `generated_at`).
+- **BusinessGoal**: An entry in `vault/Business_Goals.md` with a goal title, description,
+  and optional target date. Used to align completed work with strategic priorities.
 
-- **VaultSource**: An abstract reader over a vault directory or file. Implemented per
-  source type (Goals, Done, NeedsAction, Accounting, Briefings). Each returns a list of
-  structured records for the synthesis layer.
+- **BriefingDataSource**: Canonical vault directories read during briefing generation:
+  `Business_Goals.md`, `Done/`, `Needs_Action/`, `Accounting/`, `Briefings/`.
 
-- **BriefingContext**: The aggregated, structured data assembled from all VaultSources
-  before the LLM synthesis call. Serialisable to JSON for logging and debugging.
-
-- **BriefingConfig**: Runtime configuration loaded from `.env`. Fields: `vault_path`,
-  `openai_api_key`, `openai_model`, `lookback_days`, `bottleneck_days`,
-  `goals_max_chars`, `schedule`, `briefing_time`, `headless` (unused here, kept for
-  convention).
+- **BriefingLogEntry**: A log record in `vault/Logs/` after briefing generation. Required
+  fields: `timestamp`, `action_type: briefing_generation`, `source_path` (vault root),
+  `dest_path` (briefing file path), `outcome`, `details`.
 
 ---
 
@@ -276,87 +274,68 @@ test). Confirm the briefing is generated at the scheduled time.
 
 ### Measurable Outcomes
 
-- **SC-001**: `python -m ceo_briefing run` completes in under 60 seconds on a vault with
-  ≤200 files across all source directories.
-- **SC-002**: Generated briefing contains all six required sections; zero sections may
-  be absent even when source data is missing (fallback text is acceptable).
-- **SC-003**: Every stale item (age > threshold) in `Needs_Action/` and
-  `Pending_Approval/` produces exactly one signal file in `vault/Signals/` — no
-  duplicates on re-run (idempotent signal write).
-- **SC-004**: If GPT-4o is unavailable, the briefing is still generated in template
-  mode; `outcome: partial` is logged; no unhandled exception is raised.
-- **SC-005**: Zero external writes — no network calls other than the OpenAI inference
-  call; no emails, social posts, or Odoo operations triggered.
-- **SC-006**: A 6-field log entry is present in `vault/Logs/` after every run
-  (success or failure), confirming audit trail per Constitution Principle IX.
-
----
-
-## Architecture Notes *(for planning)*
-
-### Module structure (to be confirmed in plan.md)
-
-Mirrors the Gold Phase 3 publisher pattern — a single `ceo_briefing` package under
-`src/` with the following expected modules:
-
-```
-src/ceo_briefing/
-  __init__.py
-  __main__.py        — CLI (run, watch subcommands)
-  config.py          — BriefingConfig.from_env()
-  sources.py         — VaultSource readers (Goals, Done, NeedsAction, Accounting)
-  context.py         — BriefingContext builder (aggregates sources)
-  synthesiser.py     — GPT-4o synthesis + template fallback
-  renderer.py        — Markdown briefing renderer (6-section layout)
-  signals.py         — Signal file writer for bottleneck/stale_approval detection
-  logger.py          — 6-field vault log entry writer
-  utils.py           — ensure_vault_dirs, frontmatter helpers, date utils
-  exceptions.py      — BriefingError, SourceReadError, SynthesisError
-```
-
-### Technology (subject to plan.md confirmation)
-
-- **Python 3.12** — project standard
-- **openai>=1.0** — already installed (used by email reasoning in Silver Tier)
-- **pyyaml** — already installed
-- **python-dotenv** — already installed
-- **stdlib only** otherwise (`pathlib`, `datetime`, `re`, `json`, `schedule`)
-  — no new packages expected; `schedule` lib for watch mode (to be confirmed in plan)
-
-### Vault I/O contract
-
-| Operation | Directories | Mode |
-|-----------|-------------|------|
-| Read | `Done/`, `Needs_Action/`, `Pending_Approval/`, `Accounting/`, `Briefings/`, `Business_Goals.md` | Read-only |
-| Write | `Briefings/` (briefing file) | Write (overwrite on re-run) |
-| Write | `Signals/` (signal files) | Write (idempotent by slug) |
-| Write | `Logs/` (log entry) | Append-only |
-
-### Constitution compliance preview
-
-| Principle | Compliance |
-|-----------|------------|
-| I. Local-first | ✅ All outputs are local vault files; only external call is OpenAI inference |
-| II. Canonical folders | ✅ Uses `/Briefings/`, `/Signals/`, `/Logs/` — all canonical |
-| III. Tiered scope | ✅ Gold Phase 4 per constitution XI |
-| IV. Safety-first | ✅ No external actions; read-only on vault sources |
-| V. Ralph Wiggum Loop | ✅ LLM call retried 3× before template fallback |
-| VI. HITL approval gates | ✅ Not applicable — no external actions to gate |
-| VII. Credential isolation | ✅ OPENAI_API_KEY in `.env`; redaction in FR-016 |
-| VIII. MCP orchestration | ⚠️ MCP contract in `contracts/` to be defined in plan |
-| IX. Audit logging | ✅ 6-field log entry per run (FR-010) |
-| X. Graceful degradation | ✅ Missing dirs → note in section; LLM down → template |
-| XI. Phased development | ✅ Phase 4 only; Phase 3 confirmed closed |
-| XII. Scope boundary | ✅ No email, social, Odoo, or Phase 5 work in scope |
+- **SC-001**: A CEO can review the weekly briefing and understand business status in under
+  5 minutes — measured by briefing length (target: under 500 lines) and section clarity.
+- **SC-002**: 100% of briefing files contain all required sections — no missing or empty
+  sections except where explicitly documented as "No data available."
+- **SC-003**: 100% of briefing generation operations produce a log entry with all six
+  required fields — no partial logs.
+- **SC-004**: Briefing generation completes successfully even when one or more data sources
+  are empty or missing — zero failures due to partial data.
+- **SC-005**: Items flagged as bottlenecks in the briefing correlate 100% with items in
+  `Needs_Action/` older than 7 days or with overdue deadlines — no false positives or
+  missed items.
+- **SC-006**: Duplicate briefing requests on the same day produce unique filenames —
+  zero overwrites.
 
 ---
 
 ## Out of Scope
 
-- Sending the briefing by email or messaging (Phase 5 / future)
-- Publishing the briefing to any social media platform
-- Modifying Odoo records or executing any financial transaction
-- Real-time / intraday briefings (weekly cadence only in this phase)
-- Platinum / cloud features (no cloud storage, no hosted scheduler)
-- WhatsApp or Gmail source integration beyond reading existing vault files
-- Modifying `.specify/` or `.claude/` internal folders
+The following are explicitly excluded from Phase 4:
+
+- Sending the briefing via email, Slack, or any messaging platform
+- Posting the briefing to social media
+- Generating briefings for time periods other than the current week
+- Historical trend analysis across multiple weeks
+- Interactive dashboards or visualizations
+- Real-time or continuous briefing updates (batch generation only)
+- Odoo API calls or any external accounting system queries (reads vault `Accounting/` only)
+- Modifying any vault files except writing to `Briefings/` and `Logs/`
+- Any Platinum-tier or cloud features
+- Any SpecifyPlus modifications (`.specify/`, `.claude/`)
+- Reliability or autonomous completion improvements (Phase 5)
+- Any implementation work not covered by this spec
+
+---
+
+## Dependencies and Assumptions
+
+**Dependencies**:
+
+- Gold Phase 3 complete (social media expansion, vault lifecycle) — required for
+  `Done/<platform>/` data to exist.
+- Gold Phase 2 complete (Odoo accounting) — required for `vault/Accounting/` data to exist.
+- Gold Phase 1 complete (vault boundaries, audit logger) — required for consistent vault
+  structure and logging.
+- Constitution v3.0.0 ratified — confirmed 2026-04-14.
+- `sentinel.logger.write_log_entry` (6-field) available and tested.
+- `VAULT_PATH` environment variable set.
+
+**Assumptions**:
+
+- `Business_Goals.md` is a single markdown file in the vault root with a consistent format:
+  `## Goal: <title>` headings with descriptive text underneath. Goal alignment for `Done/`
+  items uses `goal:` frontmatter matching the goal title slug.
+- Accounting data in `vault/Accounting/` follows the structure from Phase 2: `invoices/`
+  and `payments/` subdirectories with markdown files containing `amount:`, `status:`, and
+  `date:` frontmatter.
+- The briefing period is the past 7 days from the generation date. Items with `captured_at`
+  or `completed_at` outside this window are excluded from the Completed Tasks section but
+  included in Bottlenecks/Deadlines if relevant.
+- Briefing generation is triggered manually (CLI command or MCP tool call) — no cron
+  scheduler is implemented in this phase.
+- The briefing output is plain markdown compatible with Obsidian — no custom plugins or
+  dataview queries required.
+- Proactive suggestions are rule-based (threshold checks), not AI-generated — no LLM calls
+  during briefing generation.
